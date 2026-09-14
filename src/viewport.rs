@@ -1,11 +1,13 @@
-use bevy::audio::{AudioPlayer, PlaybackSettings, Volume};
+use bevy::audio::AudioPlugin;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
 use bevy::input::mouse::MouseMotion;
+use bevy::picking::PickingSettings;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureUsages;
 use bevy::window::{
-    CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindow, WindowMode, WindowResolution,
+    CursorGrabMode, CursorOptions, EnabledButtons, MonitorSelection, PrimaryWindow, WindowMode,
+    WindowResolution,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -25,10 +27,10 @@ use crate::settings::{DisplayMode, ScenarioKind, Settings, SESSION_SECS};
 use crate::stats::{SessionRecord, StatsDb};
 use crate::theme::Theme;
 use crate::vec3::Vec3 as V3;
-use crate::wav::ensure_fallback_sounds;
 
 const WORLD_LAYER: usize = 1;
 const HUD_LAYER: usize = 2;
+const MAX_CLOCK_DELTA: f32 = 0.25;
 
 #[derive(Resource, Clone)]
 pub struct ViewportLaunch {
@@ -87,9 +89,12 @@ struct NextTargetId(u32);
 
 #[derive(Resource)]
 struct AudioBank {
-    hit: Handle<AudioSource>,
-    miss: Handle<AudioSource>,
-    volume: f32,
+    tx: std::sync::mpsc::Sender<bool>,
+}
+
+#[derive(Resource, Default)]
+struct FireGate {
+    armed: bool,
 }
 
 #[derive(Resource)]
@@ -158,15 +163,32 @@ pub fn run(mode: ViewportMode, scenario: ScenarioKind, session_id: String) -> an
                             settings.render_width,
                             settings.render_height,
                         ),
+                        decorations: false,
+                        resizable: false,
+                        enabled_buttons: EnabledButtons {
+                            minimize: false,
+                            maximize: false,
+                            close: false,
+                        },
+                        titlebar_show_buttons: false,
                         ..default()
                     }),
+                    close_when_requested: false,
                     ..default()
                 })
                 .set(AssetPlugin {
                     file_path: paths.root.display().to_string(),
                     ..default()
-                }),
+                })
+                .disable::<AudioPlugin>(),
         )
+        .insert_resource(PickingSettings {
+            is_enabled: false,
+            is_input_enabled: false,
+            is_hover_enabled: false,
+            is_window_picking_enabled: false,
+            ..default()
+        })
         .insert_resource(ViewportLaunch {
             mode,
             scenario,
@@ -183,6 +205,7 @@ pub fn run(mode: ViewportMode, scenario: ScenarioKind, session_id: String) -> an
         .add_systems(
             Update,
             (
+                arm_fire_gate.run_if(is_play),
                 update_camera,
                 fire_hitscan.run_if(is_play),
                 tick_clock.run_if(is_play),
@@ -234,20 +257,12 @@ fn setup(
     });
     commands.insert_resource(ScoreBoard { hits: 0, misses: 0 });
     commands.insert_resource(TrailBuf(Vec::new()));
-
-    let (hit_path, miss_path) = ensure_fallback_sounds(&paths.0).unwrap_or_else(|_| {
-        (
-            paths.0.cache.join("hit_fallback.wav"),
-            paths.0.cache.join("miss_fallback.wav"),
-        )
-    });
-    let hit = asset_server.load::<AudioSource>(rel_asset(&paths.0, &hit_path));
-    let miss = asset_server.load::<AudioSource>(rel_asset(&paths.0, &miss_path));
-    commands.insert_resource(AudioBank {
-        hit,
-        miss,
-        volume: settings.master_volume,
-    });
+    commands.insert_resource(FireGate::default());
+    let tx = match crate::wav::load_sfx_clips(&paths.0) {
+        Ok((hit, miss)) => crate::sfx::spawn_player(hit, miss, settings.master_volume),
+        Err(_) => std::sync::mpsc::channel().0,
+    };
+    commands.insert_resource(AudioBank { tx });
 
     let mut image = Image::new_target_texture(
         settings.render_width,
@@ -570,8 +585,31 @@ fn update_camera(look: Res<Look>, mut q: Query<&mut Transform, With<WorldCam>>) 
     tf.look_at(target, Vec3::Y);
 }
 
+fn should_arm_fire_gate(focused: bool, left_held: bool) -> bool {
+    focused && !left_held
+}
+
+fn clock_step(delta_secs: f32) -> f32 {
+    delta_secs.clamp(0.0, MAX_CLOCK_DELTA)
+}
+
+fn arm_fire_gate(
+    mut gate: ResMut<FireGate>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    if gate.armed {
+        return;
+    }
+    let focused = windows.iter().any(|window| window.focused);
+    if should_arm_fire_gate(focused, mouse.pressed(MouseButton::Left)) {
+        gate.armed = true;
+    }
+}
+
 fn fire_hitscan(
     mouse: Res<ButtonInput<MouseButton>>,
+    gate: Res<FireGate>,
     look: Res<Look>,
     mut score: ResMut<ScoreBoard>,
     mut commands: Commands,
@@ -593,7 +631,7 @@ fn fire_hitscan(
     clock: Res<MatchClock>,
     launch: Res<ViewportLaunch>,
 ) {
-    if clock.finished || !mouse.just_pressed(MouseButton::Left) {
+    if clock.finished || !gate.armed || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let t_us = (time.elapsed_secs() * 1_000_000.0) as u64;
@@ -614,7 +652,7 @@ fn fire_hitscan(
                 .min_by(|a, b| a.0.t.total_cmp(&b.0.t))
             {
                 score.hits += 1;
-                play_sound(&mut commands, &audio, true);
+                play_sound(&audio, true);
                 commands.entity(entity).despawn();
                 trace.file.world.push(WorldEvent {
                     t_us,
@@ -656,7 +694,7 @@ fn fire_hitscan(
                     pitch_deg: look.pitch,
                 });
             } else {
-                miss(&mut commands, &audio, &mut score, &mut trace, t_us, &look);
+                miss(&audio, &mut score, &mut trace, t_us, &look);
             }
         }
         ScenarioKind::GridShot => {
@@ -676,7 +714,7 @@ fn fire_hitscan(
                 };
                 let entity = *entity;
                 score.hits += 1;
-                play_sound(&mut commands, &audio, true);
+                play_sound(&audio, true);
                 let mut live_idx = Vec::new();
                 for (_, cell, _, _, _) in &cells {
                     if cell.live {
@@ -718,14 +756,13 @@ fn fire_hitscan(
                     pitch_deg: look.pitch,
                 });
             } else {
-                miss(&mut commands, &audio, &mut score, &mut trace, t_us, &look);
+                miss(&audio, &mut score, &mut trace, t_us, &look);
             }
         }
     }
 }
 
 fn miss(
-    commands: &mut Commands,
     audio: &AudioBank,
     score: &mut ScoreBoard,
     trace: &mut LiveTrace,
@@ -733,7 +770,7 @@ fn miss(
     look: &Look,
 ) {
     score.misses += 1;
-    play_sound(commands, audio, false);
+    play_sound(audio, false);
     trace.file.shots.push(ShotEvent {
         t_us,
         hit: false,
@@ -743,16 +780,8 @@ fn miss(
     });
 }
 
-fn play_sound(commands: &mut Commands, audio: &AudioBank, hit: bool) {
-    let handle = if hit {
-        audio.hit.clone()
-    } else {
-        audio.miss.clone()
-    };
-    commands.spawn((
-        AudioPlayer::new(handle),
-        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(audio.volume)),
-    ));
+fn play_sound(audio: &AudioBank, hit: bool) {
+    let _ = audio.tx.send(hit);
 }
 
 fn tick_clock(
@@ -768,7 +797,7 @@ fn tick_clock(
     if clock.finished {
         return;
     }
-    clock.elapsed += time.delta_secs();
+    clock.elapsed += clock_step(time.delta_secs());
     if clock.elapsed >= clock.duration {
         clock.finished = true;
         finish_play(&mut trace, &score, &launch, &paths.0, &settings.0);
@@ -976,19 +1005,33 @@ fn stretch_present(
 }
 
 fn grab_cursor(
-    mut cursor: Query<&mut CursorOptions>,
+    mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
     launch: Res<ViewportLaunch>,
 ) {
-    let Ok(mut cursor) = cursor.single_mut() else {
+    let Ok(mut cursor) = cursors.single_mut() else {
         return;
     };
-    if launch.mode == ViewportMode::Play {
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    let want_grab = match launch.mode {
+        ViewportMode::Play => window.focused,
+        ViewportMode::Replay => {
+            mouse.just_pressed(MouseButton::Left) || cursor.grab_mode != CursorGrabMode::None
+        }
+    };
+    if !want_grab {
+        return;
+    }
+    if cursor.visible {
         cursor.visible = false;
-        cursor.grab_mode = CursorGrabMode::Locked;
-    } else if mouse.just_pressed(MouseButton::Left) {
-        cursor.visible = false;
-        cursor.grab_mode = CursorGrabMode::Locked;
+    }
+    if cursor.grab_mode != CursorGrabMode::Confined {
+        cursor.grab_mode = CursorGrabMode::Confined;
+        let center = Vec2::new(window.width() * 0.5, window.height() * 0.5);
+        window.set_cursor_position(Some(center));
     }
 }
 
@@ -1023,4 +1066,25 @@ fn rel_asset(paths: &AppPaths, path: &std::path::Path) -> String {
 fn existing_res(paths: &AppPaths, relative: &str) -> Option<std::path::PathBuf> {
     let path = paths.resolve_res(relative);
     path.exists().then_some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clock_step, should_arm_fire_gate, MAX_CLOCK_DELTA};
+    use crate::settings::SESSION_SECS;
+
+    #[test]
+    fn fire_gate_should_ignore_the_launcher_mouse_hold() {
+        assert!(!should_arm_fire_gate(false, true));
+        assert!(!should_arm_fire_gate(true, true));
+        assert!(should_arm_fire_gate(true, false));
+    }
+
+    #[test]
+    fn match_clock_should_not_finish_from_a_single_hitch() {
+        let mut elapsed = 0.0;
+        elapsed += clock_step(SESSION_SECS);
+        assert_eq!(elapsed, MAX_CLOCK_DELTA);
+        assert!(elapsed < SESSION_SECS);
+    }
 }

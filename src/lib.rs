@@ -8,6 +8,7 @@ pub mod scenario;
 pub mod sensitivity;
 pub mod session;
 pub mod settings;
+pub mod sfx;
 pub mod stats;
 pub mod theme;
 pub mod vec3;
