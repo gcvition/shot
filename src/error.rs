@@ -1,5 +1,8 @@
+//! 本 crate 的错误类型。菜单用 anyhow 包一层；库代码尽量返回 [`ShotError`]。
+
 use std::path::PathBuf;
 
+/// 库函数返回这个。菜单进程再转成 anyhow，方便 `{:#}` 打印原因链。
 #[derive(Debug, thiserror::Error)]
 pub enum ShotError {
     #[error("invalid sensitivity: {0}")]

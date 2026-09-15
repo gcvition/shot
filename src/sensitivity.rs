@@ -1,8 +1,16 @@
+//! 厘米/360° + DPI → 鼠标灵敏度。
+//!
+//! 公式：转一圈需要 `dpi * (cm/360) / 2.54` 个 count，每个 count 转 `360 / 那个数` 度。
+//! **不要** 再乘 `delta_time`：鼠标报告的是位移，不是速度。
+//!
+//! 默认 19.05cm/360 @ 800 DPI = 刚好 6000 count 一圈（常见 CS 手感）。
+
 use crate::error::{Result, ShotError};
 
 pub const DEFAULT_CM_PER_360: f64 = 19.05;
 pub const DEFAULT_DPI: u32 = 800;
 
+/// 转一圈需要多少鼠标 count。19.05cm @ 800DPI = 6000。
 pub fn counts_per_360(cm_per_360: f64, dpi: u32) -> Result<f64> {
     if !(cm_per_360.is_finite() && cm_per_360 > 0.05 && cm_per_360 < 500.0) {
         return Err(ShotError::Sensitivity(format!(
@@ -18,10 +26,12 @@ pub fn counts_per_360(cm_per_360: f64, dpi: u32) -> Result<f64> {
     Ok(f64::from(dpi) * inches_per_360)
 }
 
+/// 每个鼠标 count 转多少度。Bevy 每帧用这个乘 `MouseMotion.delta`。
 pub fn deg_per_count(cm_per_360: f64, dpi: u32) -> Result<f64> {
     Ok(360.0 / counts_per_360(cm_per_360, dpi)?)
 }
 
+/// 把一次鼠标位移加到视角上。pitch 钳在 ±89.9°，避免万向锁。
 pub fn apply_look(
     yaw_deg: f32,
     pitch_deg: f32,
@@ -42,7 +52,7 @@ pub fn apply_look(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_look, counts_per_360, deg_per_count, DEFAULT_CM_PER_360, DEFAULT_DPI};
+    use super::{DEFAULT_CM_PER_360, DEFAULT_DPI, apply_look, counts_per_360, deg_per_count};
 
     #[test]
     fn counts_per_360_should_be_6000_for_default_sens_and_800_dpi() {

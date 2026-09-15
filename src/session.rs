@@ -1,13 +1,25 @@
+//! 一局训练的完整轨迹（`.shot` 文件）。
+//!
+//! 里面有三类时间序列，时间单位都是 **微秒**（`t_us`）：
+//! - [`MouseSample`]：每次鼠标移动后的 yaw/pitch
+//! - [`ShotEvent`]：每一次开火
+//! - [`WorldEvent`]：球出现 / 消失
+//!
+//! 回放时 [`SessionFile::look_at`] 在相邻两个鼠标采样之间做线性插值。
+//! 旧版 postcard 二进制仍能读，读完会改存成 JSON 方便人眼看。
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::fov::FovKind;
 use crate::paths::AppPaths;
-use crate::settings::{DisplayMode, ScenarioKind, Settings};
+use crate::sce;
+use crate::settings::{DisplayMode, Settings};
 use crate::vec3::Vec3;
 
 pub const SCHEMA_VERSION: u16 = 1;
 
+/// 开局那一瞬间的设置快照。回放必须用当时的 FOV/分辨率，不能用现在的。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsSnapshot {
     pub cm_per_360: f64,
@@ -23,7 +35,12 @@ pub struct SettingsSnapshot {
 }
 
 impl SettingsSnapshot {
-    pub fn from_settings(settings: &Settings, window_w: u32, window_h: u32, refresh_hz: u32) -> Self {
+    pub fn from_settings(
+        settings: &Settings,
+        window_w: u32,
+        window_h: u32,
+        refresh_hz: u32,
+    ) -> Self {
         Self {
             cm_per_360: settings.cm_per_360,
             dpi: settings.dpi,
@@ -43,13 +60,16 @@ impl SettingsSnapshot {
 pub struct SessionHeader {
     pub schema_version: u16,
     pub session_id: String,
-    pub scenario: ScenarioKind,
+    #[serde(deserialize_with = "deserialize_scenario")]
+    pub scenario: String,
     pub started_at_unix_ms: i64,
     pub duration_ms: u32,
+    /// 开局 RNG。回放必须用同一颗种子才能复现随机墙。
     pub rng_seed: u64,
     pub settings: SettingsSnapshot,
 }
 
+/// 一次鼠标移动。`dx`/`dy` 是原始 count，yaw/pitch 是移动之后的朝向。
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct MouseSample {
     pub t_us: u64,
@@ -59,6 +79,7 @@ pub struct MouseSample {
     pub pitch_deg: f32,
 }
 
+/// 一次开火。空枪时 `target_id` 为 0。
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ShotEvent {
     pub t_us: u64,
@@ -68,6 +89,7 @@ pub struct ShotEvent {
     pub pitch_deg: f32,
 }
 
+/// 世界上球的出现/消失。回放时按时间重放这张表就能重建现场。
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum WorldKind {
     Spawn,
@@ -83,6 +105,7 @@ pub struct WorldEvent {
     pub radius: f32,
 }
 
+/// 一整局的轨迹文件。存 `cache/sessions/<session_id>.shot`。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionFile {
     pub header: SessionHeader,
@@ -94,7 +117,7 @@ pub struct SessionFile {
 impl SessionFile {
     pub fn new(
         session_id: String,
-        scenario: ScenarioKind,
+        scenario: impl Into<String>,
         rng_seed: u64,
         settings: SettingsSnapshot,
     ) -> Self {
@@ -102,7 +125,7 @@ impl SessionFile {
             header: SessionHeader {
                 schema_version: SCHEMA_VERSION,
                 session_id,
-                scenario,
+                scenario: sce::migrate_scenario_id(&scenario.into()),
                 started_at_unix_ms: chrono::Utc::now().timestamp_millis(),
                 duration_ms: 0,
                 rng_seed,
@@ -116,17 +139,24 @@ impl SessionFile {
 
     pub fn save(&self, paths: &AppPaths) -> Result<()> {
         paths.ensure_dirs()?;
-        let bytes = postcard::to_allocvec(self)?;
-        std::fs::write(paths.session_trace(&self.header.session_id), bytes)?;
+        let json = serde_json::to_vec_pretty(self)?;
+        std::fs::write(paths.session_trace(&self.header.session_id), json)?;
         Ok(())
     }
 
     pub fn load(paths: &AppPaths, session_id: &str) -> Result<Self> {
         let path = paths.session_trace(session_id);
         let bytes = std::fs::read(&path)?;
-        Ok(postcard::from_bytes(&bytes)?)
+        if looks_like_json(&bytes) {
+            Ok(serde_json::from_slice(&bytes)?)
+        } else {
+            let file: Self = postcard::from_bytes(&bytes)?;
+            let _ = file.save(paths);
+            Ok(file)
+        }
     }
 
+    /// 按时间取视角。没有采样时返回 (0, 0)。
     pub fn look_at(&self, t_us: u64) -> (f32, f32) {
         if self.mouse.is_empty() {
             return (0.0, 0.0);
@@ -152,12 +182,26 @@ impl SessionFile {
     }
 }
 
+fn looks_like_json(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| *b == b'{')
+}
+
+fn deserialize_scenario<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    Ok(sce::migrate_scenario_id(&raw))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SessionFile, SettingsSnapshot};
     use crate::fov::FovKind;
     use crate::paths::AppPaths;
-    use crate::settings::{DisplayMode, ScenarioKind, Settings};
+    use crate::settings::{DisplayMode, Settings};
 
     #[test]
     fn session_roundtrip_should_preserve_mouse_samples() {
@@ -165,7 +209,7 @@ mod tests {
         let paths = AppPaths::from_root(dir.path().to_path_buf());
         paths.ensure_dirs().unwrap();
         let snapshot = SettingsSnapshot::from_settings(&Settings::default(), 1920, 1080, 144);
-        let mut file = SessionFile::new("s1".into(), ScenarioKind::SixTargets, 42, snapshot);
+        let mut file = SessionFile::new("s1".into(), "SixTargets", 42, snapshot);
         file.mouse.push(super::MouseSample {
             t_us: 0,
             dx: 1.0,
@@ -179,6 +223,12 @@ mod tests {
         assert_eq!(loaded.mouse.len(), 1);
         assert!((loaded.mouse[0].yaw_deg - 0.5).abs() < 1e-6);
         assert_eq!(loaded.header.settings.fov_kind, FovKind::HorizontalRes);
-        assert_eq!(loaded.header.settings.display_mode, DisplayMode::BorderlessStretch);
+        assert_eq!(
+            loaded.header.settings.display_mode,
+            DisplayMode::BorderlessStretch
+        );
+        let raw = std::fs::read_to_string(paths.session_trace("s1")).unwrap();
+        assert!(raw.contains("\"session_id\""));
+        assert!(raw.contains("yaw_deg"));
     }
 }

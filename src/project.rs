@@ -1,6 +1,12 @@
+//! 世界坐标 → 渲染分辨率上的像素。回放轨迹用，不走 GPU。
+//!
+//! 和 Bevy 相机一致：yaw/pitch 用 [`crate::scenario::look_direction`]，垂直 FOV + aspect
+//! 做透视。点在相机后面（depth 太小）返回 None。
+
 use crate::scenario::look_direction;
 use crate::vec3::Vec3;
 
+/// 投影到渲染缓冲像素。返回 `(sx, sy, depth)`，原点在左上，Y 向下。
 pub fn project_world(
     world: Vec3,
     eye: Vec3,
@@ -42,7 +48,7 @@ mod tests {
 
     #[test]
     fn point_on_look_axis_should_project_to_center() {
-        let world = Vec3::new(0.0, 1.5, -10.0);
+        let world = Vec3::new(0.0, PLAYER_EYE.y, -10.0);
         let (x, y, _) = project_world(
             world,
             PLAYER_EYE,

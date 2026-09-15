@@ -7,6 +7,18 @@
       "skillPath": "skills/other-engines/bevy-ecs/SKILL.md",
       "computedHash": "e6c5eb118ce847154548adfe55b7cb59829995fdd6884b2dd108a69c8916aef8"
     },
+    "gpui-kit": {
+      "source": "longbridge/gpui-kit",
+      "sourceType": "github",
+      "skillPath": "skills/gpui-kit/SKILL.md",
+      "computedHash": "7ffd8f99180c41928bd96894835d36c34e6e0e77d772337f011036a41f125f80"
+    },
+    "gpui-kit-design-guides": {
+      "source": "longbridge/gpui-kit",
+      "sourceType": "github",
+      "skillPath": "skills/gpui-kit-design-guides/SKILL.md",
+      "computedHash": "24289c455dfd0e89d0bc3f52c1df9118586b8b630b5ecf14b33f6d4fc01948d5"
+    },
     "rust-best-practices": {
       "source": "apollographql/skills",
       "sourceType": "github",

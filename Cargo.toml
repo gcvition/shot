@@ -8,8 +8,8 @@ anyhow = "1"
 bevy = { version = "0.19", features = ["wav"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 gpui-kit = "0.6"
+image = { version = "0.25", default-features = false, features = ["png"] }
 lewton = "0.10"
-openh264 = { version = "0.9", features = ["source"] }
 postcard = { version = "1", features = ["alloc"] }
 rand = "0.9"
 rand_chacha = "0.9"
@@ -20,13 +20,12 @@ serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 tempfile = "3"
-
-[features]
-default = []
-video-rs-encoder = ["dep:video-rs"]
-
-[dependencies.video-rs]
-version = "0.10"
-optional = true

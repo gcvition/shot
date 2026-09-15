@@ -1,5 +1,10 @@
+//! 射线打球体 / AABB。训练实际只用 [`ray_sphere`]；AABB 留给以后的盒子目标。
+//!
+//! 返回值是沿射线的 `t`（原点 + dir * t = 交点）。取最小正 t 就是最近命中。
+
 use crate::vec3::Vec3;
 
+/// 射线与球。`dir` 会被单位化。原点在球内时返回离开球面的那个 t。
 pub fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32> {
     let dir = dir.normalized();
     let oc = origin.sub(center);
@@ -21,6 +26,7 @@ pub fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<
     }
 }
 
+/// 轴对齐盒子。目前训练不用，留给以后的立方体目标。
 pub fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     let dir = dir.normalized();
     let inv = Vec3::new(
@@ -79,12 +85,14 @@ pub fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     }
 }
 
+/// 一次命中：目标 id + 射线参数 t。viewport 用 t 挑最近的球。
 #[derive(Clone, Copy, Debug)]
 pub struct Hit {
     pub id: u32,
     pub t: f32,
 }
 
+/// 一堆命中里取 t 最小的那个。空迭代返回 None。
 pub fn closest_hit(hits: impl IntoIterator<Item = Hit>) -> Option<Hit> {
     hits.into_iter().min_by(|a, b| a.t.total_cmp(&b.t))
 }

@@ -1,14 +1,24 @@
-use rusqlite::{params, Connection};
+//! SQLite 成绩库 `cache/stats.db`。
+//!
+//! 每打完一局，[`crate::viewport`] 会 `insert` 一行。菜单的历史列表和得分趋势都从这里读。
+//! 删除记录时同时删 `.shot` 文件，避免回放指向幽灵对局。
+//!
+//! `scenario` 列存的是场景 id（文件名），展示名要再问 [`crate::sce`]。
+
+use std::path::Path;
+
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::paths::AppPaths;
-use crate::settings::ScenarioKind;
+use crate::sce;
 
+/// 一行成绩。`id` 同时是 `.shot` 文件名。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: String,
-    pub scenario: ScenarioKind,
+    pub scenario: String,
     pub started_at: i64,
     pub duration_ms: u32,
     pub score: i64,
@@ -25,6 +35,7 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
+    /// 命中 / 总开枪。没有开枪时是 0，不是 NaN。
     pub fn accuracy(&self) -> f32 {
         let shots = self.hits + self.misses;
         if shots == 0 {
@@ -43,6 +54,7 @@ impl SessionRecord {
     }
 }
 
+/// 打开（或创建）成绩库。旧行里的 `six-targets` 会当场改成现在的场景 id。
 pub struct StatsDb {
     conn: Connection,
 }
@@ -72,6 +84,7 @@ impl StatsDb {
             CREATE INDEX IF NOT EXISTS idx_sessions_scenario_time
                 ON sessions(scenario, started_at);",
         )?;
+        migrate_legacy_scenario_ids(&conn)?;
         Ok(Self { conn })
     }
 
@@ -84,7 +97,7 @@ impl StatsDb {
             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 rec.id,
-                rec.scenario.as_str(),
+                sce::migrate_scenario_id(&rec.scenario),
                 rec.started_at,
                 rec.duration_ms,
                 rec.score,
@@ -99,14 +112,6 @@ impl StatsDb {
                 rec.video_path,
                 rec.rng_seed,
             ],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_video_path(&self, id: &str, video_path: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET video_path = ?1 WHERE id = ?2",
-            params![video_path, id],
         )?;
         Ok(())
     }
@@ -126,21 +131,48 @@ impl StatsDb {
         }
     }
 
-    pub fn recent(&self, scenario: ScenarioKind, limit: usize) -> Result<Vec<SessionRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, scenario, started_at, duration_ms, score, hits, misses,
-                    cm_per_360, dpi, fov_deg, render_width, render_height,
-                    trace_path, video_path, rng_seed
-             FROM sessions WHERE scenario = ?1
-             ORDER BY started_at DESC LIMIT ?2",
-        )?;
-        let mut rows = stmt.query(params![scenario.as_str(), limit as i64])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            out.push(row_to_record(row)?);
+    /// 时间正序（最旧在前），给得分趋势图用。
+    pub fn recent(&self, scenario: &str, limit: usize) -> Result<Vec<SessionRecord>> {
+        let mut rows = self.recent_newest(Some(scenario), limit)?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// 新到旧。图表要用时间正序时走 [`Self::recent`]。
+    pub fn recent_newest(
+        &self,
+        scenario: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SessionRecord>> {
+        let limit = limit as i64;
+        if let Some(scenario) = scenario {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, scenario, started_at, duration_ms, score, hits, misses,
+                        cm_per_360, dpi, fov_deg, render_width, render_height,
+                        trace_path, video_path, rng_seed
+                 FROM sessions WHERE scenario = ?1
+                 ORDER BY started_at DESC LIMIT ?2",
+            )?;
+            let mut rows = stmt.query(params![sce::migrate_scenario_id(scenario), limit])?;
+            collect_records(&mut rows)
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, scenario, started_at, duration_ms, score, hits, misses,
+                        cm_per_360, dpi, fov_deg, render_width, render_height,
+                        trace_path, video_path, rng_seed
+                 FROM sessions
+                 ORDER BY started_at DESC LIMIT ?1",
+            )?;
+            let mut rows = stmt.query(params![limit])?;
+            collect_records(&mut rows)
         }
-        out.reverse();
-        Ok(out)
+    }
+
+    pub fn delete(&self, id: &str) -> Result<Option<SessionRecord>> {
+        let rec = self.get(id)?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(rec)
     }
 
     pub fn latest(&self) -> Result<Option<SessionRecord>> {
@@ -159,9 +191,66 @@ impl StatsDb {
     }
 }
 
+/// 删 SQLite 行 + `.shot` + 可能残留的视频。若删的是「最近一局」，指针改到下一行。
+pub fn delete_session(paths: &AppPaths, id: &str) -> Result<()> {
+    let db = StatsDb::open(paths)?;
+    let rec = db.delete(id)?;
+    remove_session_files(paths, id, rec.as_ref());
+    match crate::launch::read_last_session(paths)? {
+        Some(last) if last == id => {
+            if let Some(next) = db.latest()? {
+                crate::launch::write_last_session(paths, &next.id)?;
+            } else {
+                crate::launch::clear_last_session(paths)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn remove_session_files(paths: &AppPaths, id: &str, rec: Option<&SessionRecord>) {
+    let canonical = paths.session_trace(id);
+    let _ = std::fs::remove_file(&canonical);
+    if let Some(rec) = rec {
+        if !rec.trace_path.is_empty() {
+            let extra = Path::new(&rec.trace_path);
+            if extra != canonical.as_path() {
+                let _ = std::fs::remove_file(extra);
+            }
+        }
+        if let Some(video) = rec.video_path.as_ref() {
+            let _ = std::fs::remove_file(video);
+        }
+    }
+    let _ = std::fs::remove_file(paths.cache.join("video").join(format!("{id}.mp4")));
+}
+
+fn migrate_legacy_scenario_ids(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET scenario = 'Sixshot Ultimate'
+         WHERE scenario IN ('six-targets', 'six', '1w6ts', 'SixTargets')",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE sessions SET scenario = 'Gridshot Ultimate'
+         WHERE scenario IN ('grid-shot', 'grid', 'gridshot', 'GridShot')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn collect_records(rows: &mut rusqlite::Rows<'_>) -> Result<Vec<SessionRecord>> {
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row_to_record(row)?);
+    }
+    Ok(out)
+}
+
 fn row_to_record(row: &rusqlite::Row<'_>) -> Result<SessionRecord> {
     let scenario_raw: String = row.get(1)?;
-    let scenario = ScenarioKind::parse(&scenario_raw).unwrap_or(ScenarioKind::SixTargets);
+    let scenario = sce::migrate_scenario_id(&scenario_raw);
     Ok(SessionRecord {
         id: row.get(0)?,
         scenario,
@@ -185,7 +274,6 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<SessionRecord> {
 mod tests {
     use super::{SessionRecord, StatsDb};
     use crate::paths::AppPaths;
-    use crate::settings::ScenarioKind;
 
     #[test]
     fn stats_db_should_return_trend_in_time_order() {
@@ -195,7 +283,7 @@ mod tests {
         for (i, score) in [10_i64, 20, 15].into_iter().enumerate() {
             db.insert(&SessionRecord {
                 id: format!("s{i}"),
-                scenario: ScenarioKind::SixTargets,
+                scenario: "Sixshot Ultimate".into(),
                 started_at: 1_000 + i as i64,
                 duration_ms: 60_000,
                 score,
@@ -212,8 +300,101 @@ mod tests {
             })
             .unwrap();
         }
-        let trend = db.recent(ScenarioKind::SixTargets, 30).unwrap();
-        assert_eq!(trend.iter().map(|r| r.score).collect::<Vec<_>>(), vec![10, 20, 15]);
+        let trend = db.recent("Sixshot Ultimate", 30).unwrap();
+        assert_eq!(
+            trend.iter().map(|r| r.score).collect::<Vec<_>>(),
+            vec![10, 20, 15]
+        );
         assert!((trend[0].accuracy() - 10.0 / 12.0).abs() < 1e-5);
+    }
+
+    fn sample(id: &str, scenario: &str, started_at: i64, score: i64) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            scenario: scenario.into(),
+            started_at,
+            duration_ms: 60_000,
+            score,
+            hits: score,
+            misses: 2,
+            cm_per_360: 19.05,
+            dpi: 800,
+            fov_deg: 103.0,
+            render_width: 1920,
+            render_height: 1080,
+            trace_path: format!("t-{id}"),
+            video_path: None,
+            rng_seed: 1,
+        }
+    }
+
+    #[test]
+    fn recent_newest_should_filter_by_scenario() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        let db = StatsDb::open(&paths).unwrap();
+        db.insert(&sample("a", "Sixshot Ultimate", 1, 10)).unwrap();
+        db.insert(&sample("b", "Gridshot Ultimate", 2, 20)).unwrap();
+        db.insert(&sample("c", "six-targets", 3, 30)).unwrap();
+        let all = db.recent_newest(None, 20).unwrap();
+        assert_eq!(
+            all.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b", "a"]
+        );
+        let six = db.recent_newest(Some("Sixshot Ultimate"), 20).unwrap();
+        assert_eq!(
+            six.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a"]
+        );
+        assert_eq!(six[0].scenario, "Sixshot Ultimate");
+    }
+
+    #[test]
+    fn delete_session_should_remove_row_files_and_last_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let db = StatsDb::open(&paths).unwrap();
+        let trace_a = paths.session_trace("a");
+        let trace_b = paths.session_trace("b");
+        let video = paths.cache.join("video");
+        std::fs::create_dir_all(&video).unwrap();
+        let video_a = video.join("a.mp4");
+        std::fs::write(&trace_a, b"{}").unwrap();
+        std::fs::write(&trace_b, b"{}").unwrap();
+        std::fs::write(&video_a, b"mp4").unwrap();
+        db.insert(&SessionRecord {
+            id: "a".into(),
+            scenario: "Sixshot Ultimate".into(),
+            started_at: 1,
+            duration_ms: 60_000,
+            score: 10,
+            hits: 10,
+            misses: 1,
+            cm_per_360: 19.05,
+            dpi: 800,
+            fov_deg: 103.0,
+            render_width: 1920,
+            render_height: 1080,
+            trace_path: trace_a.display().to_string(),
+            video_path: Some(video_a.display().to_string()),
+            rng_seed: 1,
+        })
+        .unwrap();
+        db.insert(&sample("b", "Gridshot Ultimate", 2, 20)).unwrap();
+        crate::launch::write_last_session(&paths, "a").unwrap();
+
+        super::delete_session(&paths, "a").unwrap();
+
+        let db = StatsDb::open(&paths).unwrap();
+        assert!(db.get("a").unwrap().is_none());
+        assert_eq!(db.get("b").unwrap().unwrap().id, "b");
+        assert!(!trace_a.exists());
+        assert!(trace_b.exists());
+        assert!(!video_a.exists());
+        assert_eq!(
+            crate::launch::read_last_session(&paths).unwrap().as_deref(),
+            Some("b")
+        );
     }
 }

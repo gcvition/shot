@@ -1,2 +1,4 @@
 /target
 /cache
+/qa-out
+*.mp4

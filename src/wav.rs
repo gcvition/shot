@@ -1,9 +1,14 @@
+//! 把 `res/sounds` 里的 ogg/wav 解成 PCM，给 [`crate::sfx`] 播。
+//!
+//! ogg 用 lewton 解码。文件缺失时用短正弦波顶上，保证训练不会因为音效挂掉。
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::{Result, ShotError};
 use crate::paths::AppPaths;
 
+/// 交错的 f32 PCM。`samples` 用 Arc，命中/空枪可以在线程间共享同一份。
 #[derive(Clone)]
 pub struct PcmClip {
     pub samples: Arc<[f32]>,
@@ -84,11 +89,29 @@ fn write_pcm_wav(path: &Path, sample_rate: u32, channels: u16, pcm: &[i16]) -> R
     Ok(())
 }
 
-fn first_existing_sound(paths: &AppPaths, stem: &str) -> Option<PathBuf> {
-    for ext in ["ogg", "wav"] {
-        let path = paths.res.join(format!("{stem}.{ext}"));
-        if path.exists() {
-            return Some(path);
+fn first_existing_sound(paths: &AppPaths, relative_or_stem: &str) -> Option<PathBuf> {
+    let resolved = paths.resolve_res(relative_or_stem);
+    if resolved.is_file() {
+        return Some(resolved);
+    }
+    if resolved.extension().is_some() {
+        for ext in ["ogg", "wav"] {
+            let alt = resolved.with_extension(ext);
+            if alt.is_file() {
+                return Some(alt);
+            }
+        }
+    }
+    let stem = std::path::Path::new(relative_or_stem)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(relative_or_stem);
+    for dir in [paths.res.join(crate::assets::SOUNDS_DIR), paths.res.clone()] {
+        for ext in ["ogg", "wav"] {
+            let path = dir.join(format!("{stem}.{ext}"));
+            if path.is_file() {
+                return Some(path);
+            }
         }
     }
     None
@@ -117,13 +140,20 @@ fn transcode_ogg_to_i16(src: &Path) -> Result<(Vec<i16>, u32, u16)> {
         }
     }
     if pcm.is_empty() {
-        return Err(ShotError::Other(format!("ogg produced no samples: {src:?}")));
+        return Err(ShotError::Other(format!(
+            "ogg produced no samples: {src:?}"
+        )));
     }
     Ok((pcm, sample_rate, channels))
 }
 
 fn decode_file_to_clip(src: &Path) -> Result<PcmClip> {
-    match src.extension().and_then(|ext| ext.to_str()) {
+    match src
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("ogg") => {
             let (pcm, rate, channels) = transcode_ogg_to_i16(src)?;
             Ok(PcmClip::from_i16(&pcm, rate, channels))
@@ -158,8 +188,8 @@ fn parse_pcm16_wav(bytes: &[u8]) -> Result<PcmClip> {
     Ok(PcmClip::from_i16(&pcm, sample_rate, channels))
 }
 
-fn stage_clip(paths: &AppPaths, stem: &str, fallback_hz: f32) -> PcmClip {
-    if let Some(src) = first_existing_sound(paths, stem) {
+fn stage_clip(paths: &AppPaths, relative: &str, fallback_hz: f32) -> PcmClip {
+    if let Some(src) = first_existing_sound(paths, relative) {
         if let Ok(clip) = decode_file_to_clip(&src) {
             if !clip.samples.is_empty() {
                 return clip;
@@ -169,16 +199,21 @@ fn stage_clip(paths: &AppPaths, stem: &str, fallback_hz: f32) -> PcmClip {
     PcmClip::sine(fallback_hz, 0.08, 0.35)
 }
 
-pub fn load_sfx_clips(paths: &AppPaths) -> Result<(PcmClip, PcmClip)> {
+/// 读设置里的两条路径。找不到文件就用 880Hz / 180Hz 的短蜂鸣。
+pub fn load_sfx_clips(paths: &AppPaths, hit: &str, miss: &str) -> Result<(PcmClip, PcmClip)> {
     paths.ensure_dirs()?;
     Ok((
-        stage_clip(paths, "命中", 880.0),
-        stage_clip(paths, "未命中", 180.0),
+        stage_clip(paths, hit, 880.0),
+        stage_clip(paths, miss, 180.0),
     ))
 }
 
 pub fn ensure_fallback_sounds(paths: &AppPaths) -> Result<(PathBuf, PathBuf)> {
-    let (hit, miss) = load_sfx_clips(paths)?;
+    let (hit, miss) = load_sfx_clips(
+        paths,
+        crate::assets::DEFAULT_HIT_SOUND,
+        crate::assets::DEFAULT_MISS_SOUND,
+    )?;
     let hit_path = paths.cache.join("sfx_hit.wav");
     let miss_path = paths.cache.join("sfx_miss.wav");
     write_clip_wav(&hit_path, &hit)?;
@@ -220,7 +255,12 @@ mod tests {
         assert_eq!(miss.file_name().unwrap(), "sfx_miss.wav");
         assert!(magic_is_riff(&hit));
         assert!(magic_is_riff(&miss));
-        let (hit_clip, miss_clip) = load_sfx_clips(&paths).unwrap();
+        let (hit_clip, miss_clip) = load_sfx_clips(
+            &paths,
+            crate::assets::DEFAULT_HIT_SOUND,
+            crate::assets::DEFAULT_MISS_SOUND,
+        )
+        .unwrap();
         assert!(!hit_clip.samples.is_empty());
         assert!(!miss_clip.samples.is_empty());
     }

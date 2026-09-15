@@ -1,5 +1,10 @@
+//! 可序列化的三维向量。`.shot` JSON 和 hitscan 用这个，不引入 Bevy 依赖。
+//!
+//! viewport 里和 `bevy::math::Vec3` 互转时手动拷 x/y/z 即可。
+
 use serde::{Deserialize, Serialize};
 
+/// 米为单位。序列化进 `.shot` 时字段名就是 x/y/z。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
     pub x: f32,
