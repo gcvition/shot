@@ -1,10 +1,12 @@
 //! `[Shot Extension]` 段：本软件对 KovaaK `.sce` 的扩展键。
 //!
-//! M0 只认领「标量」键（版本、单位、计分、分类、技能权重、移动/武器预设）。
-//! `ShotSpawnRegion`/`ShotMotion`/`ShotMap` 等 DSL 键由 M1+ 的
-//! `spawns`/`map` 解释器接管——M0 里出现会给 warning，但不会失败。
+//! M1 起认领 spawn DSL 键（`ShotSpawnRegion[N]`/`ShotMotion[N]`/
+//! `ShotSpawnRule[N]`/`ShotSpawnCount[N]`/`ShotSpawnRadius[N]`/
+//! `ShotSpawnShape[N]`/`ShotNoShoot[N]`，见 [`super::dsl`]）。
+//! 解析出至少一组时 `spec.legacy` 被清掉——v2 场景走 spawn 导演路径。
 
 use super::document::{KvSection, SceWarning};
+use super::dsl;
 use super::spec::{
     MovementPreset, ScenarioCategory, ScenarioTags, ScoringMode, ScoringSpec, UnitMode,
 };
@@ -31,9 +33,9 @@ pub fn apply(
     let mut warnings = Vec::new();
     let mut tags = ScenarioTags::default();
     for key in section.kv.keys() {
-        if !KNOWN_KEYS.contains(&key.as_str()) {
+        if !KNOWN_KEYS.contains(&key.as_str()) && !dsl::is_spawn_key(key) {
             warnings.push(SceWarning::new(format!(
-                "[Shot Extension] 暂不支持的键 `{key}`（M1+ 实现）"
+                "[Shot Extension] 暂不支持的键 `{key}`（后续里程碑实现）"
             )));
         }
     }
@@ -93,5 +95,11 @@ pub fn apply(
         }
     }
     // ShotWeaponPreset 已认领但 M2 武器库才生效，这里不动作也不告警。
+    let groups = dsl::collect_groups(section, &mut warnings);
+    if !groups.is_empty() {
+        // v2 场景：spawn 导演接管，旧版生成路径下线。
+        spec.spawns = groups;
+        spec.legacy = None;
+    }
     (tags, warnings)
 }

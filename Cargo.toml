@@ -31,3 +31,16 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 tempfile = "3"
+
+# Bevy 官方建议的 profile：debug 构建把依赖全开到 O3，不然 3D 视口在
+# 核显上根本跑不到 60fps（帧率低 + 输入延迟高，玩起来会晕）。自身 crate
+# 只开 O1，保留行表调试信息；正式发布一律 `--release`。
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"

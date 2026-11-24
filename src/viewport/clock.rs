@@ -68,6 +68,11 @@ pub(crate) fn tick_clock(
     score.total_ticks += 1;
     if clock.elapsed >= clock.duration {
         clock.finished = true;
+        score.score = super::combat::final_score(
+            &score,
+            &launch.scenario.scoring,
+            clock.elapsed as f64,
+        );
         finish_play(&mut trace, &score, &launch, &paths.0, &settings.0);
         exit.write(AppExit::Success);
     }

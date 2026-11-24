@@ -276,3 +276,183 @@ mod golden {
         );
     }
 }
+
+/// M1 验收：脚本化完美跟枪——每帧把准星对到目标的插值位置
+/// （玩家能做的极限），on-target 比例应接近 100%。
+mod tracking {
+    use std::time::Duration;
+
+    use bevy::input::mouse::MouseMotion;
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy::window::PrimaryWindow;
+
+    use crate::paths::AppPaths;
+    use crate::sce::{
+        MotionSpec, ScenarioSpec, ScoringMode, SpawnGroup, SpawnRegion, SpawnRule, TargetShape,
+    };
+    use crate::scenario::PLAYER_EYE;
+    use crate::settings::Settings;
+    use crate::theme::Theme;
+
+    use super::super::{
+        AppPathsRes, Look, RenderPos, ScoreState, SettingsRes, Target, ThemeRes, ViewportLaunch,
+        ViewportMode,
+        clock::tick_clock,
+        combat::{fire_hitscan, track_beam},
+        director::{self, director_tick, sim_targets, sync_render_pos},
+        player::{apply_mouse_look, arm_fire_gate, update_camera},
+        setup::setup,
+    };
+
+    fn tracking_spec() -> ScenarioSpec {
+        let mut spec = ScenarioSpec::fallback("TrackTest");
+        spec.legacy = None;
+        spec.scoring.mode = ScoringMode::OnTargetPercent;
+        spec.spawns = vec![SpawnGroup {
+            archetype: TargetShape::Sphere,
+            radius: 0.35,
+            no_shoot: false,
+            count: 1,
+            region: SpawnRegion::Box {
+                min: crate::vec3::Vec3::new(-5.0, 1.2, -14.0),
+                max: crate::vec3::Vec3::new(5.0, 2.4, -8.0),
+            },
+            motion: MotionSpec::Strafe {
+                speed: (2.5, 3.5),
+                interval: (0.8, 1.6),
+                accel: 24.0,
+                symmetric: true,
+            },
+            rule: SpawnRule::default(),
+        }];
+        spec
+    }
+
+    fn build_app(root: std::path::PathBuf) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(8)))
+            .insert_resource(Time::<Fixed>::from_hz(director::SIM_HZ))
+            .add_message::<MouseMotion>()
+            .insert_resource(ViewportLaunch {
+                mode: ViewportMode::Play,
+                scenario: tracking_spec(),
+                session_id: "tracking".into(),
+                seed_override: Some(7),
+            })
+            .insert_resource(AppPathsRes(AppPaths::from_root(root)))
+            .insert_resource(SettingsRes(Settings {
+                countdown_secs: 0,
+                ..Settings::default()
+            }))
+            .insert_resource(ThemeRes(Theme::fallback()))
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<ColorMaterial>>()
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .init_state::<super::super::RunState>()
+            .add_systems(Startup, setup)
+            // 测试里不卡 RunState::Playing，直接全量注册。
+            .add_systems(FixedUpdate, sim_targets)
+            .add_systems(PreUpdate, (arm_fire_gate, apply_mouse_look).chain())
+            .add_systems(
+                Update,
+                (
+                    update_camera,
+                    sync_render_pos,
+                    fire_hitscan,
+                    track_beam,
+                    director_tick,
+                    tick_clock,
+                )
+                    .chain(),
+            );
+        app.world_mut().spawn((
+            Window {
+                focused: true,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app
+    }
+
+    /// 把准星对准目标当前的插值位置。
+    fn aim_at_target(app: &mut App) -> bool {
+        let world = app.world_mut();
+        let mut query = world.query::<(&Target, &RenderPos)>();
+        let mut best: Option<(u32, Vec3)> = None;
+        for (target, render) in query.iter(world) {
+            let pos = Vec3::new(render.0.x, render.0.y, render.0.z);
+            if best.is_none_or(|(id, _)| target.id < id) {
+                best = Some((target.id, pos));
+            }
+        }
+        let Some((_, center)) = best else {
+            return false;
+        };
+        let d = center - Vec3::new(PLAYER_EYE.x, PLAYER_EYE.y, PLAYER_EYE.z);
+        let len = d.length().max(1e-6);
+        let mut look = world.resource_mut::<Look>();
+        look.yaw = d.x.atan2(-d.z).to_degrees();
+        look.pitch = (d.y / len).asin().to_degrees();
+        true
+    }
+
+    #[test]
+    fn smooth_strafe_script_should_stay_on_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf());
+        app.update(); // Startup：setup + 首批目标
+        app.update(); // FireGate 武装
+        assert!(app.world().resource::<super::super::FireGate>().armed);
+
+        let mut aimed_frames = 0u32;
+        for _ in 0..240 {
+            if aim_at_target(&mut app) {
+                aimed_frames += 1;
+            }
+            app.update();
+        }
+        assert!(aimed_frames > 200, "目标应该一直在场 {aimed_frames}");
+        let score = app.world().resource::<ScoreState>();
+        assert!(score.total_ticks > 0, "tick 应该在跑");
+        let rate = score.on_target_ticks as f64 / score.total_ticks as f64;
+        assert!(
+            rate > 0.95,
+            "完美跟枪命中率应 >95%，实际 {:.1}% ({}/{})",
+            rate * 100.0,
+            score.on_target_ticks,
+            score.total_ticks
+        );
+    }
+
+    #[test]
+    fn moving_targets_should_produce_keyframes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf());
+        for _ in 0..30 {
+            app.update();
+        }
+        let trace = &app.world().resource::<super::super::LiveTrace>().file;
+        assert!(
+            trace.targets.len() >= 10,
+            "240Hz 模拟应已写 60Hz 关键帧，实际 {}",
+            trace.targets.len()
+        );
+        // 目标确实动了：首个和末个关键帧位置不同。
+        let first = trace.targets.first().unwrap().pos;
+        let last = trace.targets.last().unwrap().pos;
+        assert!(
+            first.distance(last) > 0.05,
+            "目标应该移动过 first={first:?} last={last:?}"
+        );
+    }
+}

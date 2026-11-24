@@ -60,6 +60,7 @@ pub mod sce;
 pub mod scenario;
 pub mod sensitivity;
 pub mod session;
+pub mod sim;
 pub mod settings;
 pub mod sfx;
 pub mod stats;

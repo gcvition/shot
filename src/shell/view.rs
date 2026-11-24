@@ -96,18 +96,36 @@ impl Shell {
                     .child("把 .sce 文件放到 res/scenarios"),
             );
         } else {
+            // M1：按 KovaaK 分类分组（未标注的经典场景排在最前）。
+            let mut groups: Vec<(&'static str, Vec<&ScenarioSpec>)> = Vec::new();
             for spec in scenarios.iter() {
-                let id = spec.id.clone();
+                let label = spec.category.map(category_label).unwrap_or("经典");
+                match groups.iter_mut().find(|(l, _)| *l == label) {
+                    Some((_, list)) => list.push(spec),
+                    None => groups.push((label, vec![spec])),
+                }
+            }
+            for (label, specs) in groups {
                 col = col.child(
-                    Button::new(format!("sce-{id}"))
-                        .outline()
-                        .small()
-                        .w_full()
-                        .label(spec.id.clone())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.dispatch(Intent::StartScenario(id.clone()), window, cx);
-                        })),
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label),
                 );
+                for spec in specs {
+                    let id = spec.id.clone();
+                    let name = spec.display_name.clone();
+                    col = col.child(
+                        Button::new(format!("sce-{id}"))
+                            .outline()
+                            .small()
+                            .w_full()
+                            .label(if name.is_empty() { id.clone() } else { name })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dispatch(Intent::StartScenario(id.clone()), window, cx);
+                            })),
+                    );
+                }
             }
         }
         col = col.child(section_title(cx, "最近记录")).child(
@@ -422,5 +440,21 @@ impl Shell {
             );
         }
         col
+    }
+}
+
+/// KovaaK 分类的中文菜单标签。
+fn category_label(cat: crate::sce::ScenarioCategory) -> &'static str {
+    use crate::sce::ScenarioCategory as C;
+    match cat {
+        C::Flick => "甩枪 / 定位",
+        C::Tracking => "跟枪",
+        C::Switching => "转火",
+        C::Recoil => "压枪",
+        C::Movement => "身法",
+        C::Peek => "Peek",
+        C::Reaction => "反应",
+        C::Duel => "对枪",
+        C::Benchmark => "基准测试",
     }
 }

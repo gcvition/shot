@@ -203,10 +203,26 @@ pub(crate) fn setup(
     } else {
         super::gfx::six_target_mat()
     });
+    // Go/No-Go 的「别打」目标：哑光暗红，和正常目标一眼区分。
+    let no_shoot_mat = if launch
+        .scenario
+        .spawns
+        .iter()
+        .any(|g| g.no_shoot)
+    {
+        Some(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.55, 0.12, 0.10),
+            perceptual_roughness: 0.9,
+            ..default()
+        }))
+    } else {
+        None
+    };
     commands.insert_resource(TargetMaterials {
         normal: live_mat.clone(),
         hit_flash: None,
         head: None,
+        no_shoot: no_shoot_mat.clone(),
     });
     let mut mesh_cache = MeshCache::default();
 
@@ -289,9 +305,31 @@ pub(crate) fn setup(
             None => {}
         }
     }
+    // v2 场景：spawn 导演管首批 + 重生。legacy 也插空壳，系统资源不缺。
+    let mut next_id = max_id + 1;
+    let director = super::director::SpawnDirector::new(
+        launch.scenario.spawns.clone(),
+        seed,
+    );
+    if launch.mode == ViewportMode::Play && !launch.scenario.spawns.is_empty() {
+        let look_dir = crate::scenario::look_direction(0.0, 0.0);
+        super::director::spawn_initial(
+            &director,
+            &mut commands,
+            &mut meshes,
+            &mut mesh_cache,
+            &live_mat,
+            no_shoot_mat.as_ref(),
+            &mut rng,
+            &mut next_id,
+            &mut trace,
+            look_dir,
+        );
+    }
     commands.insert_resource(mesh_cache);
-    commands.insert_resource(NextTargetId(max_id + 1));
+    commands.insert_resource(NextTargetId(next_id));
     commands.insert_resource(RngRes(rng));
+    commands.insert_resource(director);
 
     if launch.mode == ViewportMode::Replay {
         if let Ok(file) = SessionFile::load(&paths.0, &launch.session_id) {
@@ -302,11 +340,19 @@ pub(crate) fn setup(
                 end: launch.scenario.end,
                 finished: false,
             });
+            let mut target_tracks = std::collections::HashMap::new();
+            for kf in &file.targets {
+                target_tracks
+                    .entry(kf.id)
+                    .or_insert_with(Vec::new)
+                    .push(*kf);
+            }
             commands.insert_resource(ReplayCtl {
                 file,
                 time: 0.0,
                 speed: 1.0,
                 paused: false,
+                target_tracks,
             });
         }
     } else {

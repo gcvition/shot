@@ -22,6 +22,31 @@ pub(crate) struct ReplayCtl {
     pub time: f32,
     pub speed: f32,
     pub paused: bool,
+    /// `id → 关键帧序列`（targets 按 id 分组；M1 运动目标靠它插值位置）。
+    pub target_tracks: std::collections::HashMap<u32, Vec<crate::session::TargetKeyframe>>,
+}
+
+/// 在关键帧轨上按 `t_us` 插值位置（轨外钳到端点）。
+fn track_pos(track: &[crate::session::TargetKeyframe], t_us: u64) -> crate::vec3::Vec3 {
+    use crate::vec3::Vec3 as V3;
+    match track.len() {
+        0 => V3::ZERO,
+        1 => track[0].pos,
+        _ => {
+            let idx = track.partition_point(|k| k.t_us <= t_us);
+            if idx == 0 {
+                return track[0].pos;
+            }
+            if idx >= track.len() {
+                return track[track.len() - 1].pos;
+            }
+            let a = &track[idx - 1];
+            let b = &track[idx];
+            let span = (b.t_us - a.t_us).max(1) as f32;
+            let alpha = (t_us - a.t_us) as f32 / span;
+            a.pos.add(b.pos.sub(a.pos).scale(alpha))
+        }
+    }
 }
 
 /// 按当前回放时间重建活着的球，并覆盖 Look。每帧先清空再刷，实现简单。
@@ -81,13 +106,19 @@ pub(crate) fn replay_tick(
     }
     let mat = mats.normal.clone();
     for event in live.values() {
+        // 运动目标：位置用关键帧轨插值，不是出生点。
+        let pos = replay
+            .target_tracks
+            .get(&event.id)
+            .map(|track| track_pos(track, t_us))
+            .unwrap_or(event.pos);
         super::targets::spawn_sphere(
             &mut commands,
             &mut meshes,
             &mut cache,
             mat.clone(),
             event.id,
-            event.pos,
+            pos,
             event.radius,
             RenderLayers::layer(WORLD_LAYER),
         );

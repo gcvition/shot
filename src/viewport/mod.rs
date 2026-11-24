@@ -56,6 +56,7 @@
 
 mod clock;
 mod combat;
+pub(crate) mod director;
 mod gfx;
 mod hud;
 mod player;
@@ -67,11 +68,13 @@ mod window;
 
 pub(crate) use clock::{LiveTrace, MatchClock};
 pub(crate) use combat::{AudioBank, ScoreState};
+pub(crate) use director::SpawnDirector;
 pub(crate) use player::{DegPerCount, FireGate, Look, PlayerBody, ViewPunch};
 pub(crate) use replay::ReplayCtl;
 pub(crate) use state::RunState;
 pub(crate) use targets::{
-    Hitbox, Hitboxes, MeshCache, NextTargetId, RngRes, SimPos, Target, TargetMaterials,
+    Hitbox, Hitboxes, Kinematics, MeshCache, NextTargetId, RenderPos, RngRes, SimPos, Target,
+    TargetMaterials, TargetMotion, TargetRng,
 };
 
 use bevy::audio::AudioPlugin;
@@ -129,8 +132,10 @@ pub(crate) enum PlaySet {
     Look,
     /// Update：眼睛位置 + Look → 相机 Transform。
     Camera,
-    /// Update：玩家开火（hitscan 判定 + 补新目标 + 轨迹）。
+    /// Update：玩家开火（hitscan 判定 + 补新目标 + 轨迹）+ 跟枪判定。
     Fire,
+    /// Update：v2 出生导演（到期重生）。legacy 场景空转。
+    Spawn,
     /// Update：计时、结束条件、状态同步。
     Clock,
     /// Update：回放驱动（只回放模式注册系统）。
@@ -201,6 +206,8 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
         .insert_resource(SettingsRes(settings))
         .insert_resource(ThemeRes(theme))
         .init_state::<RunState>()
+        // M1：目标运动跑 240Hz 固定步长；渲染端插值（见 director 模块注释）。
+        .insert_resource(Time::<Fixed>::from_hz(director::SIM_HZ))
         // Startup 只跑一次：造房间、相机、第一批目标。
         .add_systems(Startup, setup::setup)
         // 先武装开火门，再采样鼠标；顺序反了会把「点开始」那一下当开枪。
@@ -210,11 +217,19 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
         )
         .add_systems(PreUpdate, player::arm_fire_gate.in_set(PlaySet::Gate))
         .add_systems(PreUpdate, player::apply_mouse_look.in_set(PlaySet::Look))
+        // FixedUpdate：目标运动模拟。只在 Playing 跑（倒计时/结束冻结）。
+        .add_systems(
+            FixedUpdate,
+            director::sim_targets
+                .run_if(is_play)
+                .run_if(in_state(RunState::Playing)),
+        )
         .configure_sets(
             Update,
             (
                 PlaySet::Camera,
                 PlaySet::Fire,
+                PlaySet::Spawn,
                 PlaySet::Clock,
                 PlaySet::Replay,
                 PlaySet::Hud,
@@ -222,12 +237,26 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
             )
                 .chain(),
         )
-        .add_systems(Update, player::update_camera.in_set(PlaySet::Camera))
         .add_systems(
             Update,
-            combat::fire_hitscan
+            (
+                player::update_camera,
+                director::sync_render_pos,
+            )
+                .in_set(PlaySet::Camera),
+        )
+        .add_systems(
+            Update,
+            (combat::fire_hitscan, combat::track_beam)
+                .chain()
                 .run_if(is_play)
                 .in_set(PlaySet::Fire),
+        )
+        .add_systems(
+            Update,
+            director::director_tick
+                .run_if(is_play)
+                .in_set(PlaySet::Spawn),
         )
         .add_systems(
             Update,

@@ -76,6 +76,41 @@ pub(crate) enum Hitbox {
     Sphere { radius: f32 },
 }
 
+/// 运动模型实例（v2 目标才有）。fixed tick 由 `sim::director` 推进。
+#[derive(Component)]
+pub(crate) struct TargetMotion(pub crate::sim::motion::Motion);
+
+/// 该目标自己的派生 RNG（`seed ⊕ hash(id)`）。和场景 RNG 分开，
+/// 保证目标 A 先死不会改变目标 B 的随机序列。
+#[derive(Component)]
+pub(crate) struct TargetRng(pub ChaCha8Rng);
+
+/// 运动学状态：pos 镜像到 [`SimPos::curr`]，vel 给 Dodge/Strafe 用。
+#[derive(Component, Clone, Copy)]
+pub(crate) struct Kinematics(pub crate::sim::motion::KinState);
+
+/// 渲染插值后的位置。**命中判定读这里**（所见即所得）；
+/// `SimPos.prev/curr` 是模拟位置，`sync_render_pos` 每帧算出本值。
+#[derive(Component, Clone, Copy)]
+pub(crate) struct RenderPos(pub V3);
+
+/// 生命周期（v2）。`expires_at` 是相对局内模拟时间的到期秒。
+#[derive(Component, Clone, Copy)]
+pub(crate) struct Life {
+    /// 出生的局内模拟秒（反应时间统计用）。
+    pub spawned_at: f32,
+    /// None = 打到死。
+    pub expires_at: Option<f32>,
+    /// 属于哪个 spawn group（死后按该组规则重生）。
+    pub group: u32,
+    /// 是否已被命中过（反应时间只记第一次）。
+    pub first_hit_done: bool,
+}
+
+/// 该目标的活动范围（由其 spawn region 外扩得到）。
+#[derive(Component, Clone, Copy)]
+pub(crate) struct TargetBounds(pub crate::sim::motion::Aabb);
+
 /// 目标的命中区域集合（人形是 身体+头 两块）。
 #[derive(Component)]
 pub(crate) struct Hitboxes(pub SmallVec<[Hitbox; 3]>);
@@ -99,13 +134,14 @@ impl MeshCache {
     }
 }
 
-/// 目标用的材质表。M0 只有 `normal`；M3 起填受击闪白和头部材质。
+/// 目标用的材质表。`no_shoot` 是 Go/No-Go 的「别打」目标色。
 #[derive(Resource)]
 #[allow(dead_code)]
 pub(crate) struct TargetMaterials {
     pub normal: Handle<StandardMaterial>,
     pub hit_flash: Option<Handle<StandardMaterial>>,
     pub head: Option<Handle<StandardMaterial>>,
+    pub no_shoot: Option<Handle<StandardMaterial>>,
 }
 
 /// 场景级 RNG。回放用轨迹里的种子，保证出生点复现。
@@ -153,7 +189,53 @@ pub(crate) fn spawn_sphere(
             team: Team::Enemy,
         },
         SimPos::at(pos),
+        RenderPos(pos),
         Hitboxes(SmallVec::from_vec(vec![Hitbox::Sphere { radius }])),
+        layer,
+    ));
+}
+
+/// v2 目标：带运动、派生 RNG、生命周期。`no_shoot` 目标染 Neutral 阵营。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_moving(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    cache: &mut MeshCache,
+    mat: Handle<StandardMaterial>,
+    id: u32,
+    pos: V3,
+    radius: f32,
+    layer: RenderLayers,
+    motion: crate::sim::motion::Motion,
+    rng: ChaCha8Rng,
+    bounds: crate::sim::motion::Aabb,
+    life: Life,
+    no_shoot: bool,
+) {
+    let mesh = cache.sphere(meshes, radius);
+    commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(mat),
+        Transform::from_xyz(pos.x, pos.y, pos.z),
+        Target {
+            id,
+            archetype: TargetArchetype::Sphere,
+            hp: 1.0,
+            max_hp: 1.0,
+            team: if no_shoot { Team::Neutral } else { Team::Enemy },
+        },
+        SimPos::at(pos),
+        RenderPos(pos),
+        Hitboxes(SmallVec::from_vec(vec![Hitbox::Sphere { radius }])),
+        TargetMotion(motion),
+        TargetRng(rng),
+        Kinematics(crate::sim::motion::KinState {
+            pos,
+            vel: V3::ZERO,
+            on_ground: true,
+        }),
+        TargetBounds(bounds),
+        life,
         layer,
     ));
 }

@@ -11,6 +11,7 @@
 
 mod convert;
 mod document;
+pub mod dsl;
 mod extension;
 mod spec;
 
@@ -227,6 +228,41 @@ mod tests {
         assert_eq!(spec.units, super::UnitMode::Unreal);
         assert_eq!(spec.category, Some(super::ScenarioCategory::Flick));
         assert_eq!(spec.tags.skill_weights.len(), 2);
+    }
+
+    #[test]
+    fn extension_spawn_keys_should_build_groups_and_drop_legacy() {
+        let (spec, warnings) = convert(
+            &SceDocument::parse(
+                "Name=T\nTimelimit=60\n\n[Shot Extension]\nShotSpawnRegion=Box min=(-5,1,-14) max=(5,2,-8)\nShotSpawnCount=2\nShotSpawnRadius=0.3\nShotMotion=Strafe speed=2..4 reverse=0.5..1.2 accel=24\nShotSpawnRule=minSep=1 delay=0.2..0.5\n",
+            ),
+            "T",
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(spec.legacy.is_none(), "v2 场景不该保留 legacy 路径");
+        assert_eq!(spec.spawns.len(), 1);
+        let g = &spec.spawns[0];
+        assert_eq!(g.count, 2);
+        assert_eq!(g.radius, 0.3);
+        assert!(matches!(
+            g.motion,
+            super::MotionSpec::Strafe { speed: (2.0, 4.0), .. }
+        ));
+        assert_eq!(g.rule.delay, (0.2, 0.5));
+    }
+
+    #[test]
+    fn extension_no_shoot_group_should_parse_flag() {
+        let (spec, warnings) = convert(
+            &SceDocument::parse(
+                "Name=T\n\n[Shot Extension]\nShotSpawnRegion=Box min=(-1,1,-5) max=(1,2,-4)\nShotSpawnRegion2=Box min=(-1,1,-5) max=(1,2,-4)\nShotNoShoot2=1\nShotSpawnCount2=2\n",
+            ),
+            "T",
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(spec.spawns.len(), 2);
+        assert!(!spec.spawns[0].no_shoot);
+        assert!(spec.spawns[1].no_shoot);
     }
 
     #[test]

@@ -297,6 +297,10 @@ pub struct AdsSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpawnGroup {
     pub archetype: TargetShape,
+    /// 命中半径（米）；0 = 用 spec.target_radius。
+    pub radius: f32,
+    /// true = 不该打的目标（Go/No-Go）：命中算惩罚。
+    pub no_shoot: bool,
     pub count: usize,
     pub region: SpawnRegion,
     pub motion: MotionSpec,
@@ -370,16 +374,288 @@ impl Default for SpawnRule {
     }
 }
 
-/// 运动规格（M1 填参数；`Static` 是唯一在 M0 用到的）。
+/// 运动规格 DSL（`ShotMotion=` 和 `.sce` Dodge Profile 归一化后的产物）。
+/// `(f32, f32)` 参数都是区间；生成目标时用该目标的派生 RNG 采样。
 #[derive(Clone, Debug, PartialEq)]
 pub enum MotionSpec {
     Static,
-    /// 直线来回（axis 归一化方向，amp 振幅米，hz 频率）。
-    Strafe { axis: Vec3, amp: f32, hz: f32, phase_deg: f32 },
-    /// 随机方向跳变。
-    Dodge { speed: f32, interval: (f32, f32) },
-    /// 沿路径点。
-    Path { points: Vec<Vec3>, speed: f32, closed: bool },
+    /// 匀速直线（速度、水平方向角范围度）。
+    Linear { speed: (f32, f32), dir_deg: (f32, f32) },
+    /// 左右横移。
+    Strafe {
+        speed: (f32, f32),
+        interval: (f32, f32),
+        accel: f32,
+        /// 是否对称（对称 = 初始方向随机±，非对称永远从同一侧开始）。
+        symmetric: bool,
+    },
+    /// 正弦（每轴振幅 / 频率 / 相位）。
+    Sine { amp: Vec3, freq: Vec3, phase: Vec3 },
+    /// 绕玩家或定点转圈。
+    Orbit {
+        radius: f32,
+        angular_speed: f32,
+        /// 绕玩家 = None。
+        center: Option<Vec3>,
+        y_offset: f32,
+    },
+    /// Ornstein-Uhlenbeck 平滑随机漂移。
+    SmoothRandom { max_speed: f32, tau: f32 },
+    /// KovaaK Dodge Profile 等价（见 [`DodgeSpec`]）。
+    Dodge(DodgeSpec),
+    /// 垂直起落。
+    Jumper {
+        jump_speed: f32,
+        gravity: f32,
+        interval: (f32, f32),
+    },
+    /// 瞬移。
+    Blink {
+        interval: (f32, f32),
+        dist: (f32, f32),
+    },
+    /// 沿航点。
+    Path {
+        points: Vec<Vec3>,
+        speed: f32,
+        closed: bool,
+    },
+    /// 与玩家保持距离带。
+    Distance { band: (f32, f32), speed: f32 },
+    /// 叠加。
+    Composite(Vec<MotionSpec>),
+}
+
+/// `ShotMotion=Dodge ...` 或 `.sce` `[Dodge Profile]` 的参数。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DodgeSpec {
+    pub speed: f32,
+    pub accel: f32,
+    pub gravity: f32,
+    pub jump_speed: f32,
+    pub lr_interval: (f32, f32),
+    pub fb_interval: (f32, f32),
+    pub jump_interval: (f32, f32),
+    pub dist_band: (f32, f32),
+    /// 被打后变向概率与延迟。
+    pub react_chance: f32,
+    pub react_delay: (f32, f32),
+    pub react_cooldown: f32,
+}
+
+impl Default for DodgeSpec {
+    fn default() -> Self {
+        Self {
+            speed: 3.0,
+            accel: 30.0,
+            gravity: 20.0,
+            jump_speed: 6.0,
+            lr_interval: (0.5, 1.5),
+            fb_interval: (0.8, 2.0),
+            jump_interval: (1.0, 3.0),
+            dist_band: (6.0, 16.0),
+            react_chance: 0.5,
+            react_delay: (0.1, 0.35),
+            react_cooldown: 0.3,
+        }
+    }
+}
+
+impl MotionSpec {
+    /// 生成该目标的运行时 [`Motion`](crate::sim::motion::Motion)。
+    /// `anchor` = 出生点；`rng` = 该目标自己的派生 RNG（区间采样在这里定死）。
+    pub fn to_motion(
+        &self,
+        anchor: Vec3,
+        rng: &mut rand_chacha::ChaCha8Rng,
+    ) -> crate::sim::motion::Motion {
+        use crate::sim::motion::{DodgeState, Motion};
+        use rand::Rng;
+        fn range(rng: &mut rand_chacha::ChaCha8Rng, (lo, hi): (f32, f32)) -> f32 {
+            if hi <= lo {
+                lo
+            } else {
+                lo + rng.random::<f32>() * (hi - lo)
+            }
+        }
+        match self {
+            Self::Static => Motion::Static,
+            Self::Linear { speed, dir_deg } => {
+                let yaw = range(rng, *dir_deg).to_radians();
+                Motion::Linear {
+                    speed: range(rng, *speed),
+                    dir: Vec3::new(yaw.cos(), 0.0, yaw.sin()),
+                }
+            }
+            Self::Strafe {
+                speed,
+                interval,
+                accel,
+                symmetric,
+            } => {
+                let dir = if *symmetric || rng.random::<bool>() {
+                    1.0
+                } else {
+                    -1.0
+                };
+                Motion::Strafe {
+                    speed: range(rng, *speed),
+                    interval: *interval,
+                    accel: *accel,
+                    axis: Vec3::new(1.0, 0.0, 0.0),
+                    dir,
+                    next_flip: range(rng, *interval),
+                    t: 0.0,
+                }
+            }
+            Self::Sine { amp, freq, phase } => Motion::Sine {
+                anchor,
+                amp: *amp,
+                freq: *freq,
+                phase: *phase,
+            },
+            Self::Orbit {
+                radius,
+                angular_speed,
+                center,
+                y_offset,
+            } => Motion::Orbit {
+                center: *center,
+                radius: *radius,
+                angular_speed: *angular_speed,
+                angle: rng.random::<f32>() * std::f32::consts::TAU,
+                y_offset: *y_offset,
+            },
+            Self::SmoothRandom { max_speed, tau } => Motion::SmoothRandom {
+                max_speed: *max_speed,
+                tau: *tau,
+            },
+            Self::Dodge(d) => Motion::Dodge(Box::new(DodgeState {
+                speed: d.speed,
+                accel: d.accel,
+                gravity: d.gravity,
+                jump_speed: d.jump_speed,
+                lr_interval: d.lr_interval,
+                fb_interval: d.fb_interval,
+                jump_interval: d.jump_interval,
+                dist_band: d.dist_band,
+                react_chance: d.react_chance,
+                react_delay: d.react_delay,
+                react_cooldown: d.react_cooldown,
+                ground_y: anchor.y,
+                next_lr: range(rng, d.lr_interval),
+                next_fb: range(rng, d.fb_interval),
+                next_jump: range(rng, d.jump_interval),
+                ..Default::default()
+            })),
+            Self::Jumper {
+                jump_speed,
+                gravity,
+                interval,
+            } => Motion::Jumper {
+                jump_speed: *jump_speed,
+                gravity: *gravity,
+                interval: *interval,
+                ground_y: anchor.y,
+                next_jump: range(rng, *interval),
+                t: 0.0,
+            },
+            Self::Blink { interval, dist } => Motion::Blink {
+                interval: *interval,
+                dist: *dist,
+                next_blink: range(rng, *interval),
+                t: 0.0,
+            },
+            Self::Path {
+                points,
+                speed,
+                closed,
+            } => Motion::Path {
+                points: points.clone(),
+                speed: *speed,
+                closed: *closed,
+                index: 0,
+            },
+            Self::Distance { band, speed } => Motion::Distance {
+                band: *band,
+                speed: *speed,
+            },
+            Self::Composite(parts) => {
+                Motion::Composite(parts.iter().map(|p| p.to_motion(anchor, rng)).collect())
+            }
+        }
+    }
+}
+
+impl SpawnRegion {
+    /// 在区域里采一个点。`eye` = 玩家眼睛（AngularShell 用）。
+    pub fn sample(&self, rng: &mut rand_chacha::ChaCha8Rng, eye: Vec3) -> Vec3 {
+        use rand::Rng;
+        fn range(rng: &mut rand_chacha::ChaCha8Rng, (lo, hi): (f32, f32)) -> f32 {
+            if hi <= lo {
+                lo
+            } else {
+                lo + rng.random::<f32>() * (hi - lo)
+            }
+        }
+        match self {
+            Self::WallRect { center, size } => Vec3::new(
+                center.x + (rng.random::<f32>() - 0.5) * size.x,
+                center.y + (rng.random::<f32>() - 0.5) * size.y,
+                center.z + (rng.random::<f32>() - 0.5) * size.z,
+            ),
+            Self::Grid {
+                origin,
+                cols,
+                rows,
+                spacing,
+            } => {
+                let i = rng.random_range(0..(*cols * *rows).max(1));
+                Vec3::new(
+                    origin.x + (i % *cols) as f32 * spacing.x,
+                    origin.y + (i / *cols) as f32 * spacing.y,
+                    origin.z + (i % *cols) as f32 * spacing.z,
+                )
+            }
+            Self::Box { min, max } => Vec3::new(
+                range(rng, (min.x, max.x)),
+                range(rng, (min.y, max.y)),
+                range(rng, (min.z, max.z)),
+            ),
+            Self::AngularShell {
+                yaw_range,
+                pitch_range,
+                dist_range,
+            } => {
+                let yaw = range(rng, *yaw_range).to_radians();
+                let pitch = range(rng, *pitch_range).to_radians();
+                let dist = range(rng, *dist_range);
+                Vec3::new(
+                    eye.x + dist * pitch.cos() * yaw.sin(),
+                    eye.y + dist * pitch.sin(),
+                    eye.z - dist * pitch.cos() * yaw.cos(),
+                )
+            }
+            Self::Points(points) => {
+                if points.is_empty() {
+                    return Vec3::ZERO;
+                }
+                let total: f32 = points.iter().map(|p| p.weight.max(0.0)).sum();
+                if total <= 0.0 {
+                    return points[0].pos;
+                }
+                let mut pick = rng.random::<f32>() * total;
+                for p in points {
+                    pick -= p.weight.max(0.0);
+                    if pick <= 0.0 {
+                        return p.pos;
+                    }
+                }
+                points[points.len() - 1].pos
+            }
+            Self::CoverEdges { .. } => Vec3::ZERO, // M4 才有掩体
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
