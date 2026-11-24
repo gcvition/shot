@@ -20,8 +20,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// 每写这么多行强制 flush 一次（约 2s 的逐帧量，防中途崩丢日志）。
-const FLUSH_EVERY: u32 = 240;
+/// 每写这么多行强制 flush 一次（~1s 的逐帧量，防中途崩/强杀丢日志）。
+const FLUSH_EVERY: u32 = 30;
 
 #[derive(Default)]
 pub(crate) struct AimbotLog {

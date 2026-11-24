@@ -103,6 +103,9 @@ pub struct Settings {
     pub aimbot_part: AimbotPart,
     /// 自瞄运动算法（默认 Rain）。
     pub aimbot_algo: AimAlgo,
+    /// Rain 算法的拟人化参数（`aimbot::RAIN_PARAMS` 逐项可调；
+    /// fov/速度倍率走上面的独立设置项）。
+    pub aimbot_tune: crate::aimbot::AimTune,
 }
 
 impl Default for Settings {
@@ -129,6 +132,7 @@ impl Default for Settings {
             aimbot_speed_y: 1.0,
             aimbot_part: AimbotPart::Head,
             aimbot_algo: AimAlgo::Rain,
+            aimbot_tune: crate::aimbot::AimTune::default(),
         }
     }
 }
@@ -140,6 +144,8 @@ impl Settings {
             let raw = std::fs::read_to_string(&paths.settings)?;
             let mut settings: Self = serde_json::from_str(&raw)?;
             settings.migrate_asset_paths(paths);
+            // 手改 json 的兜底：越界/NaN 全部钳回描述表范围。
+            settings.aimbot_tune.clamp_ranges();
             settings.validate()?;
             Ok(settings)
         } else {

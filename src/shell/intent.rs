@@ -50,6 +50,8 @@ pub(crate) enum NumField {
     AimSpdX,
     /// 自瞄垂直速度倍率。
     AimSpdY,
+    /// Rain 拟人化参数（下标 = `aimbot::RAIN_PARAMS` 顺序）。
+    RainTune(usize),
 }
 
 /// 主题 / 准星 / 音效都是「从 res/ 里挑一个文件」，用槽位区分写到 Settings 的哪一栏。
@@ -102,6 +104,8 @@ pub(crate) enum Intent {
     SetAimbotPart(AimbotPart),
     /// 自瞄运动算法。
     SetAimbotAlgo(AimAlgo),
+    /// Rain 参数全部重置为默认值。
+    ResetRainTune,
     /// 数字框改了。`commit` 为 true 表示失焦/回车，这时才钳制并回写格式化文本。
     EditNumber {
         field: NumField,

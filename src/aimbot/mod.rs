@@ -16,5 +16,5 @@ mod humanizer;
 mod log;
 mod system;
 
-pub use humanizer::{AimTune, Humanizer, pick_target};
+pub use humanizer::{AimTune, Humanizer, RAIN_PARAMS, RainParam, pick_target};
 pub(crate) use system::{AimbotCtl, aimbot_drive, aimbot_fov_ring};

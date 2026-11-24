@@ -271,6 +271,10 @@ pub(crate) fn parse_aim_input(raw: &str, field: NumField, commit: bool) -> Optio
         NumField::Fov => (FOV_MIN, FOV_MAX),
         NumField::AimFov => (AIMFOV_MIN, AIMFOV_MAX),
         NumField::AimSpdX | NumField::AimSpdY => (SPD_MIN, SPD_MAX),
+        NumField::RainTune(ix) => {
+            let p = crate::aimbot::RAIN_PARAMS.get(ix)?;
+            (p.min, p.max)
+        }
         _ => return None,
     };
     let parsed = raw.trim().parse::<f64>().ok()?;
@@ -297,6 +301,11 @@ pub(crate) fn format_fov(value: f32) -> String {
 /// 速度倍率显示（×100 即百分比）。
 pub(crate) fn format_speed(value: f32) -> String {
     format!("{value:.2}")
+}
+
+/// Rain 参数显示：按描述表的小数位格式化。
+pub(crate) fn format_rain(value: f64, decimals: usize) -> String {
+    format!("{value:.decimals$}")
 }
 
 pub(crate) fn fov_kind_index(kind: FovKind) -> usize {

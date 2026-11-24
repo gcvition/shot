@@ -54,7 +54,9 @@ struct Flick {
 
 /// 拟人化参数表（单位：鼠标 count / 秒；时间秒）。
 /// 每项注释写物理含义——§13「常量审计」禁止来源不明的魔数。
-#[derive(Clone, Copy, Debug)]
+/// `#[serde(default)]`：设置文件缺字段/半旧的表自动回填默认值。
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct AimTune {
     /// 索敌半径（准星偏差 counts，超出不选为目标）。
     pub fov: f64,
@@ -160,6 +162,306 @@ impl Default for AimTune {
     }
 }
 
+/// Rain 可调参数描述符：设置页控件、取值范围校验共用此表。
+/// `fov`/`spd_mul_x`/`spd_mul_y` 不在此列——它们已有独立设置项
+/// （索敌 FOV 度、水平/垂直速度倍率），避免两个入口互相覆盖。
+pub struct RainParam {
+    /// 设置页标签。
+    pub label: &'static str,
+    /// 悬停说明（tooltip）。
+    pub tip: &'static str,
+    pub min: f64,
+    pub max: f64,
+    /// 滑块/数字框步进。
+    pub step: f64,
+    /// 显示小数位。
+    pub decimals: usize,
+    pub get: fn(&AimTune) -> f64,
+    pub set: fn(&mut AimTune, f64),
+}
+
+/// Rain 全部可调参数（顺序 = 设置页展示顺序）。
+pub const RAIN_PARAMS: &[RainParam] = &[
+    RainParam {
+        label: "反应延迟均值（秒）",
+        tip: "锁定新目标后到开始移动的平均反应时间。人眼-手反射弧，约 150–250ms；调小更像高手、也更假。",
+        min: 0.08,
+        max: 0.35,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.react_mean,
+        set: |t, v| t.react_mean = v,
+    },
+    RainParam {
+        label: "反应延迟标准差",
+        tip: "反应时间的逐次随机抖动（正态分布的 σ）。0 = 每次反应时间完全相同，很机械。",
+        min: 0.0,
+        max: 0.10,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.react_sd,
+        set: |t, v| t.react_sd = v,
+    },
+    RainParam {
+        label: "反应延迟下限（秒）",
+        tip: "反应时间的硬下限。低于 ~120ms 超出人类生理极限。",
+        min: 0.05,
+        max: 0.30,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.react_min,
+        set: |t, v| t.react_min = v,
+    },
+    RainParam {
+        label: "Fitts 截距 a",
+        tip: "甩枪基础耗时：与距离、目标大小无关的固定开销。调小整体变快。",
+        min: 0.02,
+        max: 0.30,
+        step: 0.01,
+        decimals: 3,
+        get: |t| t.fitts_a,
+        set: |t, v| t.fitts_a = v,
+    },
+    RainParam {
+        label: "Fitts 斜率 b",
+        tip: "每 bit 难度（log2(距离/容差+1)）增加的甩枪耗时。调小远目标甩得更快。",
+        min: 0.02,
+        max: 0.30,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.fitts_b,
+        set: |t, v| t.fitts_b = v,
+    },
+    RainParam {
+        label: "Fitts 斜率随机幅度",
+        tip: "逐次甩枪对 b 的 ±比例随机化，让轨迹时长有统计波动而非定值。",
+        min: 0.0,
+        max: 0.5,
+        step: 0.01,
+        decimals: 2,
+        get: |t| t.fitts_b_spread,
+        set: |t, v| t.fitts_b_spread = v,
+    },
+    RainParam {
+        label: "水平速度上限（counts/s）",
+        tip: "X 轴输出的最大速度。人手横向甩枪天然比纵向快。",
+        min: 500.0,
+        max: 6000.0,
+        step: 50.0,
+        decimals: 0,
+        get: |t| t.max_spd_x,
+        set: |t, v| t.max_spd_x = v,
+    },
+    RainParam {
+        label: "垂直速度上限（counts/s）",
+        tip: "Y 轴输出的最大速度，一般低于水平。",
+        min: 300.0,
+        max: 4000.0,
+        step: 50.0,
+        decimals: 0,
+        get: |t| t.max_spd_y,
+        set: |t, v| t.max_spd_y = v,
+    },
+    RainParam {
+        label: "覆盖比例下限",
+        tip: "甩枪计划覆盖误差的比例下限。<1 = 欠冲（人偏保守，落在目标前方再修）；≥1 每次都到点或过头。",
+        min: 0.70,
+        max: 1.00,
+        step: 0.01,
+        decimals: 2,
+        get: |t| t.cover_lo,
+        set: |t, v| t.cover_lo = v,
+    },
+    RainParam {
+        label: "覆盖比例上限",
+        tip: "甩枪计划覆盖误差的比例上限。>1 的带内采样会直接越过目标。",
+        min: 0.90,
+        max: 1.10,
+        step: 0.01,
+        decimals: 2,
+        get: |t| t.cover_hi,
+        set: |t, v| t.cover_hi = v,
+    },
+    RainParam {
+        label: "失误率",
+        tip: "每次甩枪被注入「拉过头」失误的概率。0 = 永不拉过头（在训练场里通常最顺眼）；调高更像真人分布。",
+        min: 0.0,
+        max: 0.30,
+        step: 0.01,
+        decimals: 2,
+        get: |t| t.miss_p,
+        set: |t, v| t.miss_p = v,
+    },
+    RainParam {
+        label: "过冲倍率下限",
+        tip: "失误发生时的最小过冲倍率（1.1 = 冲过 10% 误差距离）。",
+        min: 1.0,
+        max: 1.5,
+        step: 0.01,
+        decimals: 2,
+        get: |t| t.over_lo,
+        set: |t, v| t.over_lo = v,
+    },
+    RainParam {
+        label: "过冲倍率上限",
+        tip: "失误发生时的最大过冲倍率。调大过冲更夸张、拉回耗时更长。",
+        min: 1.0,
+        max: 2.0,
+        step: 0.01,
+        decimals: 2,
+        get: |t| t.over_hi,
+        set: |t, v| t.over_hi = v,
+    },
+    RainParam {
+        label: "停顿下限（秒）",
+        tip: "甩枪落点后的视觉确认停顿下界。停顿在低帧率下是「一顿一顿」观感来源。",
+        min: 0.0,
+        max: 0.20,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.pause_lo,
+        set: |t, v| t.pause_lo = v,
+    },
+    RainParam {
+        label: "停顿上限（秒）",
+        tip: "视觉确认停顿上界。落点在容差内时会跳过停顿直接进保持态。",
+        min: 0.0,
+        max: 0.30,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.pause_hi,
+        set: |t, v| t.pause_hi = v,
+    },
+    RainParam {
+        label: "修正段增益",
+        tip: "修正段 P 控制的 /s 增益：误差按指数收敛。步长恒 ≤0.6×剩余误差，任何帧率下不会超调；调大收敛更快、更容易 1 次到位。",
+        min: 1.0,
+        max: 30.0,
+        step: 0.5,
+        decimals: 1,
+        get: |t| t.corr_k,
+        set: |t, v| t.corr_k = v,
+    },
+    RainParam {
+        label: "修正段超时（秒）",
+        tip: "修正段最长耗时，超时直接进保持态（人会接受「差不多」）。",
+        min: 0.10,
+        max: 1.50,
+        step: 0.05,
+        decimals: 2,
+        get: |t| t.corr_timeout,
+        set: |t, v| t.corr_timeout = v,
+    },
+    RainParam {
+        label: "跟枪增益",
+        tip: "保持态跟枪的 P 增益：目标移动时残余误差的修正速度。跟枪的主体是速度前馈，这只是残余修正。",
+        min: 1.0,
+        max: 30.0,
+        step: 0.5,
+        decimals: 1,
+        get: |t| t.track_k,
+        set: |t, v| t.track_k = v,
+    },
+    RainParam {
+        label: "重甩阈值（×容差）",
+        tip: "保持态误差超过 容差×本值 时重新发起完整甩枪。调小更积极地重新拉枪。",
+        min: 1.5,
+        max: 10.0,
+        step: 0.1,
+        decimals: 1,
+        get: |t| t.reflick_ratio,
+        set: |t, v| t.reflick_ratio = v,
+    },
+    RainParam {
+        label: "手漂回复率 θ",
+        tip: "OU tremor 的均值回复率：控制手漂的相关时间 ~1/θ 秒。θ 大于 1/帧时间 时手漂退化成逐帧白噪声 = 抖动。低帧率机器建议 ≤10。",
+        min: 1.0,
+        max: 30.0,
+        step: 0.5,
+        decimals: 1,
+        get: |t| t.ou_theta,
+        set: |t, v| t.ou_theta = v,
+    },
+    RainParam {
+        label: "手漂强度 σ",
+        tip: "OU tremor 扩散强度：瞄准点徘徊稳态 std = σ/√(2θ) counts。0 = 完全无手漂（很机械）。",
+        min: 0.0,
+        max: 40.0,
+        step: 1.0,
+        decimals: 0,
+        get: |t| t.ou_sigma,
+        set: |t, v| t.ou_sigma = v,
+    },
+    RainParam {
+        label: "微停顿概率/帧",
+        tip: "甩枪途中逐帧发生微停顿的概率（人手分段发力）。调大轨迹更断续。",
+        min: 0.0,
+        max: 0.10,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.stall_p,
+        set: |t, v| t.stall_p = v,
+    },
+    RainParam {
+        label: "输出间隔均值（秒）",
+        tip: "鼠标输出的目标节拍（≈1/回报率）。帧驱动时（帧时间 ≥ 本值）逐帧直通，此值不影响观感。",
+        min: 0.001,
+        max: 0.020,
+        step: 0.001,
+        decimals: 3,
+        get: |t| t.emit_mean,
+        set: |t, v| t.emit_mean = v,
+    },
+    RainParam {
+        label: "节拍挂起概率",
+        tip: "到点帧仍按此概率挂起一拍，近似人类报告率的间隔噪声。仅在调用频率高于目标节拍时生效。",
+        min: 0.0,
+        max: 0.50,
+        step: 0.01,
+        decimals: 2,
+        get: |t| t.emit_holdover_p,
+        set: |t, v| t.emit_holdover_p = v,
+    },
+    RainParam {
+        label: "点击最小间隔（秒）",
+        tip: "两次自动开火之间的最小间隔（手速上限）。",
+        min: 0.05,
+        max: 0.50,
+        step: 0.005,
+        decimals: 3,
+        get: |t| t.click_cd,
+        set: |t, v| t.click_cd = v,
+    },
+];
+
+impl AimTune {
+    /// 把每个可调字段钳回 `RAIN_PARAMS` 声明的范围（手改 settings.json 兜底）。
+    /// 同时保证 lo≤hi 成对参数的顺序。
+    pub fn clamp_ranges(&mut self) {
+        for p in RAIN_PARAMS {
+            let v = (p.get)(self);
+            if !v.is_finite() {
+                (p.set)(self, (p.get)(&AimTune::default()));
+            } else {
+                (p.set)(self, v.clamp(p.min, p.max));
+            }
+        }
+        // 成对下/上限的顺序约束。
+        if self.cover_lo > self.cover_hi {
+            std::mem::swap(&mut self.cover_lo, &mut self.cover_hi);
+        }
+        if self.over_lo > self.over_hi {
+            std::mem::swap(&mut self.over_lo, &mut self.over_hi);
+        }
+        if self.pause_lo > self.pause_hi {
+            std::mem::swap(&mut self.pause_lo, &mut self.pause_hi);
+        }
+        if self.react_min > self.react_mean {
+            self.react_min = self.react_mean;
+        }
+    }
+}
+
 /// 拟人化移动器：双子运动状态机 + 噪声层。
 pub struct Humanizer {
     phase: Phase,
@@ -187,6 +489,15 @@ pub struct Humanizer {
     last_now: f64,
     /// 诊断：上帧输出分解 = (阶段步长x, y, tremor增量x, y, 暂存x, y)。
     pub last_dbg: (f64, f64, f64, f64, f64, f64),
+    /// 上帧驱动误差（目标角速度差分估计用）。
+    last_dx: f64,
+    last_dy: f64,
+    /// 上帧实际下发的整数输出（差分时还原目标自运动）。
+    last_ix: i32,
+    last_iy: i32,
+    /// 目标角速度 EMA（counts/s）：平滑追踪的前馈量。
+    tgt_vx: f64,
+    tgt_vy: f64,
 }
 
 impl Default for Humanizer {
@@ -213,6 +524,12 @@ impl Humanizer {
             last_click: f64::NEG_INFINITY,
             last_now: 0.0,
             last_dbg: (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            last_dx: 0.0,
+            last_dy: 0.0,
+            last_ix: 0,
+            last_iy: 0,
+            tgt_vx: 0.0,
+            tgt_vy: 0.0,
         }
     }
 
@@ -245,6 +562,12 @@ impl Humanizer {
         self.ou_y = 0.0;
         self.ou_px = 0.0;
         self.ou_py = 0.0;
+        self.last_dx = 0.0;
+        self.last_dy = 0.0;
+        self.last_ix = 0;
+        self.last_iy = 0;
+        self.tgt_vx = 0.0;
+        self.tgt_vy = 0.0;
     }
 
     /// 松键/停用：清空一切内部状态（§13 StopAiming）。
@@ -260,6 +583,12 @@ impl Humanizer {
         self.ou_y = 0.0;
         self.ou_px = 0.0;
         self.ou_py = 0.0;
+        self.last_dx = 0.0;
+        self.last_dy = 0.0;
+        self.last_ix = 0;
+        self.last_iy = 0;
+        self.tgt_vx = 0.0;
+        self.tgt_vy = 0.0;
     }
 
     fn react_delay(&mut self, cfg: &AimTune) -> f64 {
@@ -308,6 +637,25 @@ impl Humanizer {
         let dt = dt.min(0.1); // 卡顿帧不让包络跳步
         let (mut mx, mut my) = (0.0, 0.0);
         let w = w.max(1.0); // 容差下限：无可命中区域时也能收敛
+
+        // 目标角速度 EMA：err 帧间差分 + 上帧已发输出还原目标自运动
+        // （dx_n = dx_{n-1} - out + tgt_motion → tgt = dx - last_dx + last_out）。
+        // 平滑追踪的前馈量：纯位置 P 跟移动目标是 0 型系统必有稳态滞后，
+        // 且 Hold 死区会变成"追-停-追"阶梯（实测跟枪抖动根因）。
+        // α 取 0.2：~5 帧（150ms）时间常数，兼顾响应与噪声。
+        {
+            let inst_vx = (dx - self.last_dx + self.last_ix as f64) / dt;
+            let inst_vy = (dy - self.last_dy + self.last_iy as f64) / dt;
+            let a = 0.2f64;
+            self.tgt_vx += (inst_vx - self.tgt_vx) * a;
+            self.tgt_vy += (inst_vy - self.tgt_vy) * a;
+            // 估计值物理封顶：超过最大转速的多半是换目标/重选噪声。
+            let cap = cfg.max_spd_x.max(cfg.max_spd_y) * 2.0;
+            self.tgt_vx = self.tgt_vx.clamp(-cap, cap);
+            self.tgt_vy = self.tgt_vy.clamp(-cap, cap);
+        }
+        self.last_dx = dx;
+        self.last_dy = dy;
 
         match self.phase {
             Phase::Idle => {}
@@ -397,6 +745,11 @@ impl Humanizer {
                 }
             }
             Phase::Hold => {
+                // 速度前馈：每帧按目标角速度连续跟速——平滑追踪的核心项。
+                // 静态目标 EMA≈0 自动失效，不影响静态精度；变向时 EMA 有
+                // ~150ms 滞后（人跟 ADAD 变向本来就有反应时间，反而更真）。
+                mx += self.tgt_vx * dt;
+                my += self.tgt_vy * dt;
                 // 逐轴死区：误差已在命中容差内就不修（人不会为亚容差
                 // 偏差动腕；同时也避免把自身 tremor 当误差拉回，自激）。
                 if dx.abs() > w {
@@ -461,7 +814,11 @@ impl Humanizer {
         self.pending_y += my;
         self.emit_in -= dt;
         let ho_p = cfg.emit_holdover_p * (cfg.emit_mean / dt.max(cfg.emit_mean)).min(1.0);
-        if self.emit_in <= 0.0 && self.rand() >= ho_p {
+        // 帧驱动宿主直通：dt ≥ 节拍目标间隔时门控只会把一次移动拆成
+        // 0/满额 脉冲——实测 winit 偶发 dt≈3ms 微帧正好骑在 emit_mean
+        // 边界上随机开关，是跟枪锯齿的来源；节拍门仅对高频调用保留。
+        let open = self.emit_in <= 0.0 || dt >= cfg.emit_mean;
+        if open && self.rand() >= ho_p {
             self.rx += self.pending_x;
             self.ry += self.pending_y;
             self.pending_x = 0.0;
@@ -471,12 +828,16 @@ impl Humanizer {
             let iy = self.ry.trunc() as i32;
             self.rx -= ix as f64;
             self.ry -= iy as f64;
+            self.last_ix = ix;
+            self.last_iy = iy;
             (ix, iy)
         } else {
             if self.emit_in <= 0.0 {
                 // 挂起路径同样给间隔噪声（节拍抖动对两条路径一致）。
                 self.emit_in = cfg.emit_mean * (0.7 + 0.6 * self.rand());
             }
+            self.last_ix = 0;
+            self.last_iy = 0;
             (0, 0)
         }
     }
@@ -727,6 +1088,30 @@ mod tests {
             max_out = max_out.max(ix.abs()).max(iy.abs());
         }
         assert!(max_out <= 12, "frozen-now React out={max_out}");
+    }
+
+    /// `clamp_ranges`：越界钳回描述表范围、成对 lo>hi 交换、NaN 回默认。
+    #[test]
+    fn clamp_ranges_should_fix_invalid_tune() {
+        let mut t = AimTune {
+            react_mean: 9.0,
+            cover_lo: 0.99,
+            cover_hi: 0.80,
+            ou_sigma: f64::NAN,
+            ..AimTune::default()
+        };
+        t.clamp_ranges();
+        assert!(t.react_mean <= crate::aimbot::RAIN_PARAMS[0].max);
+        assert!(t.cover_lo <= t.cover_hi);
+        assert_eq!(t.ou_sigma, AimTune::default().ou_sigma);
+    }
+
+    /// serde：settings.json 里只写部分字段时其余回填当前默认值。
+    #[test]
+    fn tune_should_deserialize_partial_json() {
+        let t: AimTune = serde_json::from_str(r#"{"react_mean": 0.25}"#).unwrap();
+        assert_eq!(t.react_mean, 0.25);
+        assert_eq!(t.corr_k, AimTune::default().corr_k);
     }
 
     /// 确定性：同种子同输入 → 同输出序列。

@@ -17,7 +17,7 @@ use super::intent::{AssetSlot, Intent, NumField, Page, SelectKind};
 use super::model::Shell;
 use super::widgets::{
     AIMFOV_MAX, AIMFOV_MIN, CM360_MAX, CM360_MIN, DPI_MAX, DPI_MIN, FOV_MAX, FOV_MIN, SPD_MAX,
-    SPD_MIN, asset_choices, format_cm360, format_fov, format_speed, history_choices,
+    SPD_MIN, asset_choices, format_cm360, format_fov, format_rain, format_speed, history_choices,
     parse_aim_input, replace_choices, res_value, resolution_choices, sync_input_text,
     sync_slider, try_even_res,
 };
@@ -74,6 +74,16 @@ impl Shell {
                 self.settings.aimbot_algo = algo;
                 cx.notify();
             }
+            Intent::ResetRainTune => {
+                self.settings.aimbot_tune = crate::aimbot::AimTune::default();
+                for (ix, (slider, input)) in self.rain_params.iter().enumerate() {
+                    let p = &crate::aimbot::RAIN_PARAMS[ix];
+                    let value = (p.get)(&self.settings.aimbot_tune);
+                    sync_slider(slider, value as f32, window, cx);
+                    sync_input_text(input, format_rain(value, p.decimals), window, cx);
+                }
+                cx.notify();
+            }
             Intent::EditNumber { field, raw, commit } => {
                 self.apply_numeric(field, &raw, commit, window, cx);
                 cx.notify();
@@ -124,7 +134,8 @@ impl Shell {
             | NumField::Fov
             | NumField::AimFov
             | NumField::AimSpdX
-            | NumField::AimSpdY => {
+            | NumField::AimSpdY
+            | NumField::RainTune(_) => {
                 if let Some(value) = parse_aim_input(raw, field, commit) {
                     self.apply_aim(field, value, commit, window, cx);
                 }
@@ -223,6 +234,20 @@ impl Shell {
                 sync_slider(slider, v, window, cx);
                 if sync_input {
                     sync_input_text(input, format_speed(v), window, cx);
+                }
+            }
+            NumField::RainTune(ix) => {
+                if let Some(p) = crate::aimbot::RAIN_PARAMS.get(ix)
+                    && let Some((slider, input)) = self.rain_params.get(ix)
+                {
+                    let v = value.clamp(p.min, p.max);
+                    (p.set)(&mut self.settings.aimbot_tune, v);
+                    self.settings.aimbot_tune.clamp_ranges();
+                    let v = (p.get)(&self.settings.aimbot_tune);
+                    sync_slider(slider, v as f32, window, cx);
+                    if sync_input {
+                        sync_input_text(input, format_rain(v, p.decimals), window, cx);
+                    }
                 }
             }
             _ => {}

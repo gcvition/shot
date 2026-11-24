@@ -23,7 +23,7 @@ use crate::viewport::{
 };
 
 use super::algo::ConstAim;
-use super::humanizer::{AimTune, Humanizer, pick_target};
+use super::humanizer::{Humanizer, pick_target};
 use super::log::AimbotLog;
 
 /// 目标速度估计的位置历史窗口（秒）。窗口本身是感知滞后的特性
@@ -34,7 +34,6 @@ const VEL_HIST_SECS: f64 = 0.12;
 /// 这里只存运行态。
 #[derive(Resource, Default)]
 pub struct AimbotCtl {
-    pub tune: AimTune,
     hum: Humanizer,
     /// 匀速系步进器（AFG/NEXO/Nep 三模式；Rain 走 `hum`）。
     con: ConstAim,
@@ -153,8 +152,23 @@ pub(crate) fn aimbot_drive(
             &launch.session_id,
         );
         let s = &settings.0;
+        // 日志侧只标「非默认」——分析时先确认跑的是不是调过的参数。
+        let tune_tag = if s.aimbot_tune == crate::aimbot::AimTune::default() {
+            "default".to_string()
+        } else {
+            format!(
+                "custom react={:.3} fitts={:.3}+{:.3} corr={:.1} trk={:.1} ou={:.1}/{:.0}",
+                s.aimbot_tune.react_mean,
+                s.aimbot_tune.fitts_a,
+                s.aimbot_tune.fitts_b,
+                s.aimbot_tune.corr_k,
+                s.aimbot_tune.track_k,
+                s.aimbot_tune.ou_theta,
+                s.aimbot_tune.ou_sigma,
+            )
+        };
         ctl.log.line(&format!(
-            "START t={t:.3} scen={} sess={} key={:?} algo={:?} fov={:.1} spd={:.2}x/{:.2}y part={:?} deg={:.6}",
+            "START t={t:.3} scen={} sess={} key={:?} algo={:?} fov={:.1} spd={:.2}x/{:.2}y part={:?} deg={:.6} tune={tune_tag}",
             launch.scenario.id,
             launch.session_id.get(..8).unwrap_or(&launch.session_id),
             s.aimbot_key,
@@ -200,7 +214,8 @@ pub(crate) fn aimbot_drive(
     // 锁定目标的速度估计（位置历史差分，窗口含感知滞后）。
     // 上限 25 m/s：Blink/瞬移目标的差分会炸出离谱速度，不能让提前量
     // 把瞄准点甩到屏幕外（"天旋地转"的来源之一）。
-    let mut tune = ctl.tune;
+    let mut tune = settings.0.aimbot_tune;
+    tune.clamp_ranges();
     tune.spd_mul_x = f64::from(settings.0.aimbot_speed_x);
     tune.spd_mul_y = f64::from(settings.0.aimbot_speed_y);
     let algo = settings.0.aimbot_algo;

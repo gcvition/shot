@@ -55,6 +55,8 @@ pub(crate) struct Shell {
     pub(super) aimfov: Entity<SliderState>,
     pub(super) spdx: Entity<SliderState>,
     pub(super) spdy: Entity<SliderState>,
+    /// Rain 参数控件对：(slider, input)，下标 = `aimbot::RAIN_PARAMS`。
+    pub(super) rain_params: Vec<(Entity<SliderState>, Entity<InputState>)>,
     pub(super) volume: Entity<SliderState>,
     pub(super) history_select: ChoiceSelect,
     pub(super) resolution_select: ChoiceSelect,
@@ -182,6 +184,25 @@ impl Shell {
         });
         let volume = cx.new(|_| slider_state(0.0, 1.0, 0.05, settings.master_volume));
 
+        let rain_params: Vec<_> = crate::aimbot::RAIN_PARAMS
+            .iter()
+            .map(|p| {
+                let value = (p.get)(&settings.aimbot_tune);
+                let slider = cx.new(|_| {
+                    slider_state(p.min as f32, p.max as f32, p.step as f32, value as f32)
+                });
+                let input = number_state(
+                    window,
+                    cx,
+                    widgets::format_rain(value, p.decimals),
+                    p.min,
+                    p.max,
+                    p.step,
+                );
+                (slider, input)
+            })
+            .collect();
+
         let history_items = history_choices(&paths, None);
         let history_sig = choice_sig(&history_items);
         let history_select =
@@ -236,6 +257,10 @@ impl Shell {
         bind_aim_slider(&aimfov, NumField::AimFov, window, cx, &mut subscriptions);
         bind_aim_slider(&spdx, NumField::AimSpdX, window, cx, &mut subscriptions);
         bind_aim_slider(&spdy, NumField::AimSpdY, window, cx, &mut subscriptions);
+        for (ix, (slider, input)) in rain_params.iter().enumerate() {
+            bind_aim_slider(slider, NumField::RainTune(ix), window, cx, &mut subscriptions);
+            bind_numeric(input, NumField::RainTune(ix), window, cx, &mut subscriptions);
+        }
         bind_volume(&volume, window, cx, &mut subscriptions);
 
         bind_select_confirm(&history_select, window, cx, &mut subscriptions, |value| {
@@ -326,6 +351,7 @@ impl Shell {
             aimfov,
             spdx,
             spdy,
+            rain_params,
             volume,
             history_select,
             resolution_select,

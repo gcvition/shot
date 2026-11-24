@@ -161,6 +161,45 @@ React |out|≤2；Hold flips 仅 tremor 幅度（≤12 counts≈0.4°)。
 在无检测压力的训练场里每 7 次甩枪一次过冲 = 纯观感缺陷。
 同一份拟人化设计在不同语境要分档——Rain 侧部署时可恢复大值。
 
+#### v4.4 — 跟枪场景优化（Smooth Strafe Sphere 实测驱动）
+
+跟枪日志签名：`ph=Hold` 段 `dx` 在 36↔65 间锯齿、`out` 每 ~2 帧
+踢 30 其余为 0——**Hold 死区（dx.abs()>w 才修）+ 纯位置 P 跟
+移动目标是 0 型系统，稳态必然滞后，死区内准星原地不动 = 阶梯
+追踪**。
+
+修复——速度前馈（控制论标准的平滑追踪方案）：
+
+- step() 内部 EMA 估计目标角速度：`tgt_v = dx - last_dx + last_out`
+  按 dt 归一，α=0.2（~150ms 时间常数，变向有真实反应滞后）
+- Hold 段每帧输出 `tgt_v × dt` 连续跟速 + 原死区 P 修残余；
+  静态目标 EMA≈0 → 前馈自动失效，静态行为不变
+- 节拍门微帧修复：winit 偶发 dt≈3ms 微帧骑在 `emit_mean` 边界
+  随机开关 → 跟速被拆成 0/满额脉冲；`dt >= emit_mean` 时直通
+- `log.rs` FLUSH_EVERY 240→30（强杀下最多丢 1s 数据）
+
+实测（34fps, spd=3.0）:Hold |dx| p50 **46 → 1.8 counts**,87 HIT /
+0 MISS，追踪全程连续小步（out p50≈1-3)——准星黏住目标；
+Sixshot 静态回归 **34 HIT / 1 MISS** 无变化。
+
+#### v4.5 — Rain 参数全面设置化 + 自定义 tune 诊断
+
+- `AimTune` 加 serde（`#[serde(default)]` 半旧配置自动回填）,
+  `settings.aimbot_tune` 持久化；`RAIN_PARAMS` 描述表（label/tip/
+  min/max/step/decimals/get/set）是设置页、UI 校验、运行时
+  `clamp_ranges()` 的唯一事实源——`fov`/`spd_mul` 三项不表列
+  （已有独立设置项）。
+- 设置页算法选 Rain 时出现「Rain 参数」区：25 项滑块+数字框，
+  参数名悬停出说明（原生 `.tooltip` 经 `Field::label_fn` 挂
+  Stateful div);「恢复默认」一键回填并同步全部控件。
+- `NumField::RainTune(ix)` 复用 EditNumber/SlideAim 路径；
+  `system.rs` 每帧从 `settings.aimbot_tune` 构建 tune 并
+  `clamp_ranges()`（手改 json 兜底，成对 lo>hi 交换）。
+- 日志 START 行加 `tune=default|custom react=.. fitts=.. corr=..`：
+  分析日志先确认跑的是不是调过的参数。
+- 实测：settings.json 写 `react_mean=0.25` → START 行出现
+  `tune=custom react=0.250`,31 HIT/0 MISS——链路通。
+
 #### 算法切换（`aimbot_algo`）
 
 `system.rs` 外层（锁管理/速度估计/提前量/FOV 滞回/开火差分/日志）

@@ -23,8 +23,8 @@ use crate::settings::{AimAlgo, AimbotButton, AimbotPart, DisplayMode};
 use super::intent::{Intent, Page};
 use super::model::Shell;
 use super::widgets::{
-    SHELL_HEIGHT, SHELL_WIDTH, fov_kind_from_index, fov_kind_index, labeled_select, section_title,
-    slider_with_input, version_caption,
+    SHELL_HEIGHT, SHELL_WIDTH, format_rain, fov_kind_from_index, fov_kind_index, labeled_select,
+    section_title, slider_with_input, version_caption,
 };
 
 impl Render for Shell {
@@ -416,7 +416,8 @@ impl Shell {
                                     .child(Radio::new("aa-nexo").label("NEXO").small())
                                     .child(Radio::new("aa-nep").label("Nep").small()),
                             ),
-                    ),
+                    )
+                    .children(self.rain_param_fields(cx)),
             )
             .child(section_title(cx, "画面"))
             .child(
@@ -505,6 +506,58 @@ impl Shell {
                         this.dispatch(Intent::SaveSettings { announce: true }, window, cx);
                     })),
             )
+    }
+
+    /// Rain 拟人化参数区：仅算法选 Rain 时展示（其余算法不吃这套参数）。
+    /// 每行 = 标签（悬停出说明 tooltip）+ 滑块 + 数字框，由
+    /// `aimbot::RAIN_PARAMS` 描述表驱动，与 `Shell::rain_params` 按下标对齐。
+    fn rain_param_fields(&self, cx: &mut Context<Self>) -> Vec<Field> {
+        if self.settings.aimbot_algo != AimAlgo::Rain {
+            return Vec::new();
+        }
+        let mut fields = Vec::with_capacity(crate::aimbot::RAIN_PARAMS.len() + 1);
+        fields.push(
+            Field::new()
+                .label("Rain 参数")
+                .description("以下参数仅 Rain 算法生效；悬停参数名查看说明")
+                .child(
+                    Button::new("rain-reset")
+                        .ghost()
+                        .small()
+                        .label("恢复默认")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.dispatch(Intent::ResetRainTune, window, cx);
+                        })),
+                ),
+        );
+        let default = crate::aimbot::AimTune::default();
+        for (ix, p) in crate::aimbot::RAIN_PARAMS.iter().enumerate() {
+            let Some((slider, input)) = self.rain_params.get(ix) else {
+                break;
+            };
+            let tip = format!(
+                "{}\n范围 {}–{} · 默认 {}",
+                p.tip,
+                format_rain(p.min, p.decimals),
+                format_rain(p.max, p.decimals),
+                format_rain((p.get)(&default), p.decimals),
+            );
+            fields.push(
+                Field::new()
+                    .label_fn(move |_, _| {
+                        let tip = tip.clone();
+                        div()
+                            .id(ElementId::named_usize("rain-p", ix))
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            })
+                            .child(p.label)
+                    })
+                    .child(slider_with_input(slider, input, rems(5.5))),
+            );
+        }
+        fields
     }
 
     /// 上一局的数字 + 回放/再练 + 得分折线。
