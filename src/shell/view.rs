@@ -16,7 +16,7 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Root, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
-use crate::sce::{self, MENU_LIMIT, ScenarioSpec};
+use crate::sce::{self, ScenarioSpec};
 use crate::settings::DisplayMode;
 
 use super::intent::{Intent, Page};
@@ -96,7 +96,7 @@ impl Shell {
                     .child("把 .sce 文件放到 res/scenarios"),
             );
         } else {
-            for spec in scenarios.iter().take(MENU_LIMIT) {
+            for spec in scenarios.iter() {
                 let id = spec.id.clone();
                 col = col.child(
                     Button::new(format!("sce-{id}"))

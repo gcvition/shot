@@ -5,6 +5,7 @@
 //! | （无参数，或随便什么不是 play/replay） | GPUI 菜单 [`shot::shell::run`] |
 //! | `play [场景id] [对局id]` | Bevy 训练。场景缺省时用 `res/scenarios` 里第一个 `.sce` |
 //! | `replay <对局id>` | Bevy 回放。从 `cache/sessions/<id>.shot` 读轨迹 |
+//! | `export-trace <对局id>` | 把 `.shot` 导成 JSON 打到 stdout（调试用） |
 //!
 //! 菜单里点「开始训练」并不会在当前进程里嵌 Bevy，而是 [`shot::launch`] 再 spawn
 //! 一份自己。这样 GPUI 和 Bevy 各管各的窗口，互不抢消息循环。
@@ -49,6 +50,16 @@ fn real_main() -> anyhow::Result<()> {
             let spec = shot::sce::load_scenario(&paths, &scenario_id)
                 .unwrap_or_else(|_| shot::sce::ScenarioSpec::fallback(&scenario_id));
             shot::viewport::run(shot::viewport::ViewportMode::Replay, spec, id)?;
+        }
+        Some("export-trace") => {
+            // `.shot` 是二进制，调试时把轨迹导成 JSON 打到 stdout。
+            let id = args
+                .get(2)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("export-trace requires session id"))?;
+            let paths = shot::paths::AppPaths::discover()?;
+            let file = shot::session::SessionFile::load(&paths, &id)?;
+            println!("{}", serde_json::to_string_pretty(&file)?);
         }
         _ => shot::shell::run()?,
     }
