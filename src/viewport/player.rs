@@ -127,13 +127,25 @@ pub(crate) fn apply_mouse_look(
         return;
     }
     if clock.countdown > 0.0 {
+        // ADS 镜像与正常路径一致：自瞄绑右键时倒计时内的输出按
+        // deg_eff 换算，裸 deg.0 会让输出被放大 1/sens_mult 倍。
+        let deg_eff = if mouse.pressed(MouseButton::Right) {
+            launch
+                .scenario
+                .weapon
+                .ads
+                .map(|a| deg.0 * f64::from(a.sens_mult))
+                .unwrap_or(deg.0)
+        } else {
+            deg.0
+        };
         for event in motion.read() {
             let (yaw, pitch) = crate::sensitivity::apply_look(
                 look.yaw,
                 look.pitch,
                 event.delta.x,
                 event.delta.y,
-                deg.0,
+                deg_eff,
             );
             look.yaw = yaw;
             look.pitch = pitch;

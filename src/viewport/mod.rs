@@ -68,14 +68,15 @@ mod targets;
 mod window;
 
 pub(crate) use clock::{LiveTrace, MatchClock};
-pub(crate) use combat::{AudioBank, ScoreState};
+pub(crate) use combat::{AudioBank, ScoreState, WeaponState};
 pub(crate) use director::SpawnDirector;
-pub(crate) use player::{DegPerCount, FireGate, Look, PlayerBody};
+pub(crate) use player::{DegPerCount, FireGate, Look, PlayerBody, WorldCam};
 pub(crate) use replay::ReplayCtl;
+pub(crate) use setup::AimbotFovRing;
 pub(crate) use state::RunState;
 pub(crate) use targets::{
     Hitbox, Hitboxes, Kinematics, MeshCache, NextTargetId, RenderPos, RngRes, SimPos, Target,
-    TargetMaterials, TargetMotion, TargetRng,
+    TargetMaterials, TargetMotion, TargetRng, Team,
 };
 
 use bevy::audio::AudioPlugin;
@@ -103,6 +104,9 @@ pub struct ViewportLaunch {
     pub session_id: String,
     /// 测试固定种子用。None 时 Play 随机、Replay 读轨迹里的种子。
     pub seed_override: Option<u64>,
+    /// 自瞄接管开关（`--aimbot` / `SHOT_AIMBOT=1`）。
+    /// 输入从消息层合成，真实玩法路径零改动。
+    pub aimbot: bool,
 }
 
 /// 训练还是回放。决定注册哪些 system、是否录鼠标。
@@ -133,6 +137,8 @@ pub(crate) enum PlaySet {
     Look,
     /// Update：眼睛位置 + Look → 相机 Transform。
     Camera,
+    /// Update：自瞄驱动（RenderPos → MouseMotion/ButtonInput 合成输入）。
+    Aimbot,
     /// Update：玩家开火（hitscan 判定 + 补新目标 + 轨迹）+ 跟枪判定。
     Fire,
     /// Update：v2 出生导演（到期重生）。legacy 场景空转。
@@ -147,9 +153,19 @@ pub(crate) enum PlaySet {
     Present,
 }
 
+/// 环境变量开关：菜单进程也可用 `SHOT_AIMBOT=1` 开自瞄。
+fn aimbot_env() -> bool {
+    std::env::var("SHOT_AIMBOT").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// 启动 Bevy App。这个函数会阻塞到窗口关掉（或训练结束发 `AppExit`）。
 pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> anyhow::Result<()> {
-    run_inner(mode, scenario, session_id, None)
+    run_inner(mode, scenario, session_id, None, aimbot_env())
+}
+
+/// 自瞄开局入口：`shot play <场景> --aimbot`。
+pub fn run_aimbot(scenario: ScenarioSpec, session_id: String) -> anyhow::Result<()> {
+    run_inner(ViewportMode::Play, scenario, session_id, None, true)
 }
 
 /// 课程连播入口（M7）：同 `run`，但插 `PlanRun`——打完一关进
@@ -159,7 +175,13 @@ pub fn run_playlist(
     session_id: String,
     plan: crate::playlist::PlanRun,
 ) -> anyhow::Result<()> {
-    run_inner(ViewportMode::Play, scenario, session_id, Some(plan))
+    run_inner(
+        ViewportMode::Play,
+        scenario,
+        session_id,
+        Some(plan),
+        aimbot_env(),
+    )
 }
 
 fn run_inner(
@@ -167,10 +189,13 @@ fn run_inner(
     scenario: ScenarioSpec,
     session_id: String,
     plan: Option<crate::playlist::PlanRun>,
+    aimbot: bool,
 ) -> anyhow::Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure_dirs()?;
     let settings = Settings::load_or_default(&paths)?;
+    // 自瞄武装 = 入参（--aimbot / SHOT_AIMBOT）或设置开关；局内再按激活键生效。
+    let aimbot = aimbot || settings.aimbot_enabled;
     let theme = Theme::load(&paths, &settings.theme_path).unwrap_or_else(|_| Theme::fallback());
     let window_mode = match settings.display_mode {
         DisplayMode::BorderlessStretch => {
@@ -221,7 +246,9 @@ fn run_inner(
             scenario,
             session_id,
             seed_override: None,
+            aimbot,
         })
+        .insert_resource(crate::aimbot::AimbotCtl::default())
         .insert_resource(AppPathsRes(paths))
         .insert_resource(SettingsRes(settings))
         .insert_resource(ThemeRes(theme))
@@ -255,6 +282,7 @@ fn run_inner(
             Update,
             (
                 PlaySet::Camera,
+                PlaySet::Aimbot,
                 PlaySet::Fire,
                 PlaySet::Spawn,
                 PlaySet::Clock,
@@ -273,6 +301,12 @@ fn run_inner(
             )
                 .chain()
                 .in_set(PlaySet::Camera),
+        )
+        .add_systems(
+            Update,
+            (crate::aimbot::aimbot_drive, crate::aimbot::aimbot_fov_ring)
+                .run_if(is_play)
+                .in_set(PlaySet::Aimbot),
         )
         .add_systems(
             Update,

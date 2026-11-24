@@ -20,8 +20,9 @@ use crate::stats::SessionRecord;
 use super::intent::{AssetSlot, Intent, NumField, Page, SelectKind};
 use super::widgets::{
     self, ChoiceSelect, DPI_MAX, DPI_MIN, FOV_MAX, FOV_MIN, CM360_MAX, CM360_MIN, SHELL_HEIGHT,
-    SHELL_WIDTH, asset_choices, choice_sig, format_cm360, format_fov, history_choices, number_state,
-    res_value, resolution_choices, selected_ix, slider_state,
+    AIMFOV_MAX, AIMFOV_MIN, SHELL_WIDTH, SPD_MAX, SPD_MIN, asset_choices, choice_sig,
+    format_cm360, format_fov, format_speed, history_choices, number_state, res_value,
+    resolution_choices, selected_ix, slider_state,
 };
 
 /// 菜单窗口的完整 Model。字段不要改成 `pub`：外面只能通过 Intent 改它。
@@ -48,6 +49,12 @@ pub(crate) struct Shell {
     pub(super) cm360: Entity<SliderState>,
     pub(super) dpi: Entity<SliderState>,
     pub(super) fov: Entity<SliderState>,
+    pub(super) aimfov_input: Entity<InputState>,
+    pub(super) spdx_input: Entity<InputState>,
+    pub(super) spdy_input: Entity<InputState>,
+    pub(super) aimfov: Entity<SliderState>,
+    pub(super) spdx: Entity<SliderState>,
+    pub(super) spdy: Entity<SliderState>,
     pub(super) volume: Entity<SliderState>,
     pub(super) history_select: ChoiceSelect,
     pub(super) resolution_select: ChoiceSelect,
@@ -123,6 +130,30 @@ impl Shell {
             FOV_MAX,
             1.0,
         );
+        let aimfov_input = number_state(
+            window,
+            cx,
+            format_fov(settings.aimbot_fov_deg),
+            AIMFOV_MIN,
+            AIMFOV_MAX,
+            1.0,
+        );
+        let spdx_input = number_state(
+            window,
+            cx,
+            format_speed(settings.aimbot_speed_x),
+            SPD_MIN,
+            SPD_MAX,
+            0.05,
+        );
+        let spdy_input = number_state(
+            window,
+            cx,
+            format_speed(settings.aimbot_speed_y),
+            SPD_MIN,
+            SPD_MAX,
+            0.05,
+        );
         let cm360 = cx.new(|_| {
             slider_state(
                 CM360_MIN as f32,
@@ -135,6 +166,20 @@ impl Shell {
             slider_state(DPI_MIN as f32, DPI_MAX as f32, 50.0, settings.dpi as f32)
         });
         let fov = cx.new(|_| slider_state(FOV_MIN as f32, FOV_MAX as f32, 1.0, settings.fov_deg));
+        let aimfov = cx.new(|_| {
+            slider_state(
+                AIMFOV_MIN as f32,
+                AIMFOV_MAX as f32,
+                1.0,
+                settings.aimbot_fov_deg,
+            )
+        });
+        let spdx = cx.new(|_| {
+            slider_state(SPD_MIN as f32, SPD_MAX as f32, 0.05, settings.aimbot_speed_x)
+        });
+        let spdy = cx.new(|_| {
+            slider_state(SPD_MIN as f32, SPD_MAX as f32, 0.05, settings.aimbot_speed_y)
+        });
         let volume = cx.new(|_| slider_state(0.0, 1.0, 0.05, settings.master_volume));
 
         let history_items = history_choices(&paths, None);
@@ -182,9 +227,15 @@ impl Shell {
         bind_numeric(&cm360_input, NumField::Cm360, window, cx, &mut subscriptions);
         bind_numeric(&dpi_input, NumField::Dpi, window, cx, &mut subscriptions);
         bind_numeric(&fov_input, NumField::Fov, window, cx, &mut subscriptions);
+        bind_numeric(&aimfov_input, NumField::AimFov, window, cx, &mut subscriptions);
+        bind_numeric(&spdx_input, NumField::AimSpdX, window, cx, &mut subscriptions);
+        bind_numeric(&spdy_input, NumField::AimSpdY, window, cx, &mut subscriptions);
         bind_aim_slider(&cm360, NumField::Cm360, window, cx, &mut subscriptions);
         bind_aim_slider(&dpi, NumField::Dpi, window, cx, &mut subscriptions);
         bind_aim_slider(&fov, NumField::Fov, window, cx, &mut subscriptions);
+        bind_aim_slider(&aimfov, NumField::AimFov, window, cx, &mut subscriptions);
+        bind_aim_slider(&spdx, NumField::AimSpdX, window, cx, &mut subscriptions);
+        bind_aim_slider(&spdy, NumField::AimSpdY, window, cx, &mut subscriptions);
         bind_volume(&volume, window, cx, &mut subscriptions);
 
         bind_select_confirm(&history_select, window, cx, &mut subscriptions, |value| {
@@ -269,6 +320,12 @@ impl Shell {
             cm360,
             dpi,
             fov,
+            aimfov_input,
+            spdx_input,
+            spdy_input,
+            aimfov,
+            spdx,
+            spdy,
             volume,
             history_select,
             resolution_select,

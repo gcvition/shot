@@ -35,7 +35,11 @@ fn real_main() -> anyhow::Result<()> {
                 .get(3)
                 .cloned()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            shot::viewport::run(shot::viewport::ViewportMode::Play, spec, id)?;
+            if args.iter().any(|a| a == "--aimbot") {
+                shot::viewport::run_aimbot(spec, id)?;
+            } else {
+                shot::viewport::run(shot::viewport::ViewportMode::Play, spec, id)?;
+            }
         }
         Some("replay") => {
             let id = args

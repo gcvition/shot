@@ -174,6 +174,28 @@ pub(crate) fn rgba_to_image(src: appearance::RgbaImage, nearest: bool) -> Image 
     image
 }
 
+/// 单位圆环网格（外半径 1、内半径 `inner`），供自瞄 FOV 指示用；
+/// 屏幕上的椭圆缩放由 Transform 承担，mesh 只生成一次。
+pub(crate) fn ring_mesh2d(inner: f32, segments: usize) -> Mesh {
+    let mut positions = Vec::with_capacity(segments * 2);
+    let mut uvs = Vec::with_capacity(segments * 2);
+    let mut indices = Vec::with_capacity(segments * 6);
+    for i in 0..segments {
+        let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let (s, c) = a.sin_cos();
+        positions.push([c, s, 0.0]);
+        positions.push([c * inner, s * inner, 0.0]);
+        uvs.push([0.0, 0.0]);
+        uvs.push([0.0, 0.0]);
+    }
+    for i in 0..segments {
+        let o = (i * 2) as u32;
+        let n = (((i + 1) % segments) * 2) as u32;
+        indices.extend_from_slice(&[o, o + 1, n, n, o + 1, n + 1]);
+    }
+    mesh2d_from_parts(positions, uvs, indices)
+}
+
 pub(crate) fn empty_mesh2d() -> Mesh {
     mesh2d_from_parts(
         vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],

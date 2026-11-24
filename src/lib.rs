@@ -47,6 +47,7 @@
 //! | [`fov`] | 水平/垂直 FOV 换成 Bevy 要的垂直弧度 |
 //! | [`vec3`] | 序列化用的小向量（不依赖 Bevy） |
 
+pub mod aimbot;
 pub mod analysis;
 pub mod appearance;
 pub mod assets;

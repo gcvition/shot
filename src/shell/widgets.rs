@@ -29,6 +29,11 @@ pub(crate) const DPI_MIN: f64 = 200.0;
 pub(crate) const DPI_MAX: f64 = 32_000.0;
 pub(crate) const FOV_MIN: f64 = 60.0;
 pub(crate) const FOV_MAX: f64 = 120.0;
+/// 自瞄 FOV（度）与速度倍率的合法区间。
+pub(crate) const AIMFOV_MIN: f64 = 5.0;
+pub(crate) const AIMFOV_MAX: f64 = 90.0;
+pub(crate) const SPD_MIN: f64 = 0.2;
+pub(crate) const SPD_MAX: f64 = 3.0;
 
 /// Select 一行：内部值（路径或场景 id）+ 给人看的标题。
 #[derive(Clone, PartialEq)]
@@ -264,6 +269,8 @@ pub(crate) fn parse_aim_input(raw: &str, field: NumField, commit: bool) -> Optio
         NumField::Cm360 => (CM360_MIN, CM360_MAX),
         NumField::Dpi => (DPI_MIN, DPI_MAX),
         NumField::Fov => (FOV_MIN, FOV_MAX),
+        NumField::AimFov => (AIMFOV_MIN, AIMFOV_MAX),
+        NumField::AimSpdX | NumField::AimSpdY => (SPD_MIN, SPD_MAX),
         _ => return None,
     };
     let parsed = raw.trim().parse::<f64>().ok()?;
@@ -285,6 +292,11 @@ pub(crate) fn format_cm360(value: f64) -> String {
 
 pub(crate) fn format_fov(value: f32) -> String {
     format!("{value:.0}")
+}
+
+/// 速度倍率显示（×100 即百分比）。
+pub(crate) fn format_speed(value: f32) -> String {
+    format!("{value:.2}")
 }
 
 pub(crate) fn fov_kind_index(kind: FovKind) -> usize {

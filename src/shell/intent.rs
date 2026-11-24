@@ -7,7 +7,7 @@
 //! 最后在 `view.rs` 里 `dispatch(Intent::YourThing)`。
 
 use crate::fov::FovKind;
-use crate::settings::DisplayMode;
+use crate::settings::{AimAlgo, AimbotButton, AimbotPart, DisplayMode};
 
 /// 主窗口三个页面。Tab 的下标必须与这个顺序一致：0 训练 / 1 设置 / 2 记录。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +44,12 @@ pub(crate) enum NumField {
     Cm360,
     Dpi,
     Fov,
+    /// 自瞄索敌半径（度）。
+    AimFov,
+    /// 自瞄水平速度倍率。
+    AimSpdX,
+    /// 自瞄垂直速度倍率。
+    AimSpdY,
 }
 
 /// 主题 / 准星 / 音效都是「从 res/ 里挑一个文件」，用槽位区分写到 Settings 的哪一栏。
@@ -86,6 +92,16 @@ pub(crate) enum Intent {
     SetResolution { width: u32, height: u32 },
     SetFovKind(FovKind),
     SetDisplayMode(DisplayMode),
+    /// 自瞄开关。
+    SetAimbotEnabled(bool),
+    /// 自瞄激活键（按住生效）。
+    SetAimbotKey(AimbotButton),
+    /// 自瞄 FOV 圈显示开关。
+    SetAimbotFovVisible(bool),
+    /// 自瞄目标部位。
+    SetAimbotPart(AimbotPart),
+    /// 自瞄运动算法。
+    SetAimbotAlgo(AimAlgo),
     /// 数字框改了。`commit` 为 true 表示失焦/回车，这时才钳制并回写格式化文本。
     EditNumber {
         field: NumField,

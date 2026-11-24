@@ -16,9 +16,10 @@ use crate::stats::StatsDb;
 use super::intent::{AssetSlot, Intent, NumField, Page, SelectKind};
 use super::model::Shell;
 use super::widgets::{
-    CM360_MAX, CM360_MIN, DPI_MAX, DPI_MIN, FOV_MAX, FOV_MIN, asset_choices, format_cm360,
-    format_fov, history_choices, parse_aim_input, replace_choices, res_value, resolution_choices,
-    sync_input_text, sync_slider, try_even_res,
+    AIMFOV_MAX, AIMFOV_MIN, CM360_MAX, CM360_MIN, DPI_MAX, DPI_MIN, FOV_MAX, FOV_MIN, SPD_MAX,
+    SPD_MIN, asset_choices, format_cm360, format_fov, format_speed, history_choices,
+    parse_aim_input, replace_choices, res_value, resolution_choices, sync_input_text,
+    sync_slider, try_even_res,
 };
 
 impl Shell {
@@ -51,6 +52,26 @@ impl Shell {
             }
             Intent::SetDisplayMode(mode) => {
                 self.settings.display_mode = mode;
+                cx.notify();
+            }
+            Intent::SetAimbotEnabled(on) => {
+                self.settings.aimbot_enabled = on;
+                cx.notify();
+            }
+            Intent::SetAimbotKey(key) => {
+                self.settings.aimbot_key = key;
+                cx.notify();
+            }
+            Intent::SetAimbotFovVisible(on) => {
+                self.settings.aimbot_fov_visible = on;
+                cx.notify();
+            }
+            Intent::SetAimbotPart(part) => {
+                self.settings.aimbot_part = part;
+                cx.notify();
+            }
+            Intent::SetAimbotAlgo(algo) => {
+                self.settings.aimbot_algo = algo;
                 cx.notify();
             }
             Intent::EditNumber { field, raw, commit } => {
@@ -98,7 +119,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match field {
-            NumField::Cm360 | NumField::Dpi | NumField::Fov => {
+            NumField::Cm360
+            | NumField::Dpi
+            | NumField::Fov
+            | NumField::AimFov
+            | NumField::AimSpdX
+            | NumField::AimSpdY => {
                 if let Some(value) = parse_aim_input(raw, field, commit) {
                     self.apply_aim(field, value, commit, window, cx);
                 }
@@ -170,6 +196,33 @@ impl Shell {
                         window,
                         cx,
                     );
+                }
+            }
+            NumField::AimFov => {
+                self.settings.aimbot_fov_deg =
+                    (value as f32).clamp(AIMFOV_MIN as f32, AIMFOV_MAX as f32);
+                sync_slider(&self.aimfov, self.settings.aimbot_fov_deg, window, cx);
+                if sync_input {
+                    sync_input_text(
+                        &self.aimfov_input,
+                        format_fov(self.settings.aimbot_fov_deg),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            NumField::AimSpdX | NumField::AimSpdY => {
+                let v = (value as f32).clamp(SPD_MIN as f32, SPD_MAX as f32);
+                let (slider, input) = if matches!(field, NumField::AimSpdX) {
+                    self.settings.aimbot_speed_x = v;
+                    (&self.spdx, &self.spdx_input)
+                } else {
+                    self.settings.aimbot_speed_y = v;
+                    (&self.spdy, &self.spdy_input)
+                };
+                sync_slider(slider, v, window, cx);
+                if sync_input {
+                    sync_input_text(input, format_speed(v), window, cx);
                 }
             }
             _ => {}

@@ -50,6 +50,13 @@ cargo.exe build --release     # 实际游玩用这个（thin LTO）
   v1 JSON/旧字段自动升级。
 - `src/stats/` — SQLite；`PRAGMA user_version` 迁移在 migrate.rs。
 - `src/sfx.rs` — `Sender<SfxEvent>`；只有 Hit/Miss 有音频，其余变体吞掉。
+- `src/aimbot/` — 自瞄模块（M-实验，无硬件自瞄算法测试床；完整设计/排障见
+  `docs/aimbot-dev.md`）。`humanizer.rs` Rain 双子运动状态机、`algo.rs`
+  AFG/NEXO/Nep 匀速系对照、`system.rs` 驱动（走真实 MouseMotion/ButtonInput
+  输入路径，不绕过玩法）、`log.rs` 诊断日志（`cache/logs/aimbot-*.log`，
+  F 行含 stp/trm/pnd/dt 输出分解）。武装 = `--aimbot`/`SHOT_AIMBOT=1`/设置开关；
+  持激活键生效（默认右键，设置页可改键/FOV/部位/算法/X-Y 速度倍率）。
+  实测回放：`cache/testaim.ps1`（SendInput 真按右键 + 截屏）。
 
 ## 已知问题
 

@@ -47,6 +47,10 @@ pub(crate) struct TrailGfx;
 #[derive(Component)]
 pub(crate) struct HitMarkGfx;
 
+/// 自瞄 FOV 指示圈（单位圆环，Transform 缩放成屏幕上的角半径椭圆）。
+#[derive(Component)]
+pub(crate) struct AimbotFovRing;
+
 /// 建场景：资源、三台相机、房间、第一批球、准星、HUD。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn setup(
@@ -446,6 +450,16 @@ pub(crate) fn setup(
         Transform::from_xyz(0.0, 0.0, 0.7),
         Visibility::Hidden,
         HitMarkGfx,
+        hud_layer.clone(),
+    ));
+
+    // 自瞄 FOV 圈：单位圆环，尺寸由 aimbot::fov_ring 每帧按当前投影算。
+    commands.spawn((
+        Mesh2d(meshes.add(super::gfx::ring_mesh2d(0.97, 64))),
+        MeshMaterial2d(color_materials.add(Color::srgba(0.55, 0.85, 1.0, 0.5))),
+        Transform::from_xyz(0.0, 0.0, 1.2),
+        Visibility::Hidden,
+        AimbotFovRing,
         hud_layer.clone(),
     ));
 

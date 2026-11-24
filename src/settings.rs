@@ -25,6 +25,47 @@ pub enum DisplayMode {
     Windowed,
 }
 
+/// 自瞄激活键（按住生效）。`Left` 不可绑——和开火冲突。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AimbotButton {
+    /// 鼠标右键（默认）。
+    #[default]
+    Right,
+    /// 鼠标中键。
+    Middle,
+    /// 鼠标后侧键。
+    Back,
+    /// 鼠标前侧键。
+    Forward,
+}
+
+/// 自瞄运动算法。Rain = 双子运动状态机（本仓自研，默认）；
+/// 其余三家是对照实现的匀速定步长系（实现细节见 `aimbot/algo.rs`）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AimAlgo {
+    /// Rain：React→Flick→Pause→Correct→Hold 双子运动 + Fitts + tremor。
+    #[default]
+    Rain,
+    /// AFG：归一化方向 × 逐帧定步长，纯匀速无包络。
+    Afg,
+    /// NEXO：同骨架 + 800ms 三次贝塞尔速度包络。
+    Nexo,
+    /// Nep：同骨架 + 随机速度游走（~150ms 抽 ±20% 新乘数并插值）。
+    Nep,
+}
+
+/// 自瞄目标部位。人形目标按命中体结构取点，非人形（纯球）回退中心。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AimbotPart {
+    /// 头部：取最高的 `OffsetSphere`（人形头，半径小 → 容差自动收紧）。
+    #[default]
+    Head,
+    /// 躯干：胶囊中心。
+    Body,
+    /// 中心：`RenderPos` 原点（v2 旧行为，容差取最大命中半径）。
+    Center,
+}
+
 /// 菜单和 Bevy 共用的设置。缺字段时用 [`Default`]（`#[serde(default)]`）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -46,6 +87,22 @@ pub struct Settings {
     pub master_volume: f32,
     /// 开局倒计时秒数。0 = 立刻能开枪。
     pub countdown_secs: u32,
+    /// 自瞄功能开关（按住激活键时生效；默认关）。
+    pub aimbot_enabled: bool,
+    /// 自瞄激活键（默认鼠标右键）。
+    pub aimbot_key: AimbotButton,
+    /// 自瞄索敌半径（度，准星周围该角度内的目标才会被选中）。
+    pub aimbot_fov_deg: f32,
+    /// 局内是否画出自瞄 FOV 圈。
+    pub aimbot_fov_visible: bool,
+    /// 自瞄水平速度倍率（1.0 = 默认）。
+    pub aimbot_speed_x: f32,
+    /// 自瞄垂直速度倍率（1.0 = 默认）。
+    pub aimbot_speed_y: f32,
+    /// 自瞄目标部位（默认头部；非人形目标自动回退中心）。
+    pub aimbot_part: AimbotPart,
+    /// 自瞄运动算法（默认 Rain）。
+    pub aimbot_algo: AimAlgo,
 }
 
 impl Default for Settings {
@@ -64,6 +121,14 @@ impl Default for Settings {
             miss_sound: crate::assets::DEFAULT_MISS_SOUND.into(),
             master_volume: 1.0,
             countdown_secs: 0,
+            aimbot_enabled: false,
+            aimbot_key: AimbotButton::Right,
+            aimbot_fov_deg: 36.0,
+            aimbot_fov_visible: true,
+            aimbot_speed_x: 1.0,
+            aimbot_speed_y: 1.0,
+            aimbot_part: AimbotPart::Head,
+            aimbot_algo: AimAlgo::Rain,
         }
     }
 }
@@ -117,6 +182,24 @@ impl Settings {
         }
         if self.countdown_secs > 30 {
             return Err(ShotError::Other("countdown must be 0..=30".into()));
+        }
+        if !(self.aimbot_fov_deg.is_finite()
+            && (5.0..=90.0).contains(&self.aimbot_fov_deg))
+        {
+            return Err(ShotError::Other(format!(
+                "aimbot fov must be in 5..=90, got {}",
+                self.aimbot_fov_deg
+            )));
+        }
+        for (name, v) in [
+            ("aimbot_speed_x", self.aimbot_speed_x),
+            ("aimbot_speed_y", self.aimbot_speed_y),
+        ] {
+            if !(v.is_finite() && (0.2..=3.0).contains(&v)) {
+                return Err(ShotError::Other(format!(
+                    "{name} must be in 0.2..=3.0, got {v}"
+                )));
+            }
         }
         Ok(())
     }

@@ -95,6 +95,7 @@ mod golden {
                 scenario,
                 session_id: "golden".into(),
                 seed_override: Some(42),
+                aimbot: false,
             })
             .insert_resource(AppPathsRes(AppPaths::from_root(root)))
             .insert_resource(SettingsRes(settings))
@@ -345,6 +346,7 @@ mod tracking {
                 scenario: tracking_spec(),
                 session_id: "tracking".into(),
                 seed_override: Some(7),
+                aimbot: false,
             })
             .insert_resource(AppPathsRes(AppPaths::from_root(root)))
             .insert_resource(SettingsRes(Settings {
@@ -500,6 +502,7 @@ mod weapons {
                 scenario: spec,
                 session_id: "weapons".into(),
                 seed_override: Some(7),
+                aimbot: false,
             })
             .insert_resource(AppPathsRes(AppPaths::from_root(root)))
             .insert_resource(SettingsRes(Settings {
@@ -670,6 +673,7 @@ mod movement {
                 scenario: spec,
                 session_id: "movement".into(),
                 seed_override: Some(7),
+                aimbot: false,
             })
             .insert_resource(AppPathsRes(AppPaths::from_root(root)))
             .insert_resource(SettingsRes(Settings {
@@ -861,5 +865,451 @@ mod e2e {
         assert!(plan.advance("sess-1", 90.0, Some(&db), &specs));
         assert!(!plan.advance("sess-2", 80.0, Some(&db), &specs));
         assert_eq!(plan.results.len(), 3);
+    }
+}
+
+/// 自瞄端到端：AimbotCtl + aimbot_drive 走真实输入管线
+/// （MouseMotion→apply_mouse_look→fire_hitscan），验证命中率与门禁。
+mod aimbot_e2e {
+    use std::time::Duration;
+
+    use bevy::input::mouse::MouseMotion;
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy::window::PrimaryWindow;
+
+    use crate::aimbot::{AimbotCtl, aimbot_drive};
+    use crate::paths::AppPaths;
+    use crate::sce::{LegacySpawn, MotionSpec, ScenarioSpec, SpawnGroup, SpawnRegion, SpawnRule};
+    use crate::scenario::{GRID_RADIUS, TARGET_RADIUS};
+    use crate::settings::Settings;
+    use crate::theme::Theme;
+
+    use super::super::{
+        AppPathsRes, FireGate, LiveTrace, ScoreState, SettingsRes, ThemeRes, ViewportLaunch,
+        ViewportMode,
+        clock::tick_clock,
+        combat::{fire_hitscan, track_beam},
+        director::{self, director_tick, sim_targets, sync_render_pos},
+        player::{apply_mouse_look, arm_fire_gate, update_camera},
+        setup::setup,
+    };
+
+    const FRAME_MS: u64 = 8;
+
+    /// headless 没有 InputPlugin 的逐帧 `just_*` 清理——手动补上等价语义，
+    /// 否则一次 `press()` 在按住期间每帧都是 `just_pressed`
+    /// （真实 App 里 InputSystem 每 PreUpdate 清理，只真一帧）。
+    fn clear_input_frame(mut b: ResMut<ButtonInput<MouseButton>>) {
+        b.clear();
+    }
+
+    fn wall_spec() -> ScenarioSpec {
+        ScenarioSpec {
+            live_count: 6,
+            target_radius: TARGET_RADIUS,
+            duration_secs: 20.0,
+            legacy: Some(LegacySpawn::RandomWall),
+            ..ScenarioSpec::fallback("AimbotWall")
+        }
+    }
+
+    fn grid_spec() -> ScenarioSpec {
+        ScenarioSpec {
+            live_count: 3,
+            target_radius: GRID_RADIUS,
+            duration_secs: 20.0,
+            glossy: true,
+            legacy: Some(LegacySpawn::Grid { cells: 9 }),
+            ..ScenarioSpec::fallback("AimbotGrid")
+        }
+    }
+
+    /// 慢速正弦靶（X 轴 ±2m，4s 周期）：验证非静止目标的追踪命中。
+    fn sine_spec() -> ScenarioSpec {
+        let mut spec = ScenarioSpec::fallback("AimbotSine");
+        spec.duration_secs = 20.0;
+        spec.legacy = None;
+        spec.spawns = vec![SpawnGroup {
+            hp: 1.0,
+            headshot_only: false,
+            bot: None,
+            archetype: crate::sce::TargetShape::Sphere,
+            radius: 0.3,
+            no_shoot: false,
+            count: 1,
+            region: SpawnRegion::Box {
+                min: crate::vec3::Vec3::new(-1.0, 1.5, -11.0),
+                max: crate::vec3::Vec3::new(1.0, 1.5, -9.0),
+            },
+            motion: MotionSpec::Sine {
+                amp: crate::vec3::Vec3::new(2.0, 0.0, 0.0),
+                freq: crate::vec3::Vec3::new(0.25, 0.0, 0.0),
+                phase: crate::vec3::Vec3::ZERO,
+            },
+            rule: SpawnRule::default(),
+        }];
+        spec
+    }
+
+    /// 静止人形靶 + headshot_only：只有爆头计分，打身体记空枪。
+    /// 这是区分「瞄头 / 瞄中心」的最强信号。
+    fn humanoid_spec() -> ScenarioSpec {
+        let mut spec = ScenarioSpec::fallback("AimbotHumanoid");
+        spec.duration_secs = 15.0;
+        spec.legacy = None;
+        spec.spawns = vec![SpawnGroup {
+            hp: 1.0,
+            headshot_only: true,
+            bot: None,
+            archetype: crate::sce::TargetShape::Humanoid,
+            radius: 0.3,
+            no_shoot: false,
+            count: 1,
+            region: SpawnRegion::Box {
+                min: crate::vec3::Vec3::new(0.0, 0.9, -10.0),
+                max: crate::vec3::Vec3::new(0.0, 0.9, -10.0),
+            },
+            motion: MotionSpec::Static,
+            rule: SpawnRule::default(),
+        }];
+        spec
+    }
+
+    fn build_app(root: std::path::PathBuf, scenario: ScenarioSpec, aimbot: bool) -> App {
+        build_app_cfg(
+            root,
+            scenario,
+            aimbot,
+            Settings {
+                countdown_secs: 0,
+                ..Settings::default()
+            },
+        )
+    }
+
+    fn build_app_cfg(
+        root: std::path::PathBuf,
+        scenario: ScenarioSpec,
+        aimbot: bool,
+        settings: Settings,
+    ) -> App {
+        build_app_cfg_fps(root, scenario, aimbot, settings, FRAME_MS)
+    }
+
+    /// `frame_ms`：模拟帧时长——8ms(125fps) 是理想环境，29ms(~34fps)
+    /// 贴近真实低端环境（用户实测机），抖动问题只在粗帧率下暴露。
+    fn build_app_cfg_fps(
+        root: std::path::PathBuf,
+        scenario: ScenarioSpec,
+        aimbot: bool,
+        settings: Settings,
+        frame_ms: u64,
+    ) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                frame_ms,
+            )))
+            .insert_resource(Time::<Fixed>::from_hz(director::SIM_HZ))
+            .add_message::<MouseMotion>()
+            .insert_resource(ViewportLaunch {
+                mode: ViewportMode::Play,
+                scenario,
+                session_id: "aimbot".into(),
+                seed_override: Some(7),
+                aimbot,
+            })
+            .insert_resource(AimbotCtl::default())
+            .insert_resource(AppPathsRes(AppPaths::from_root(root)))
+            .insert_resource(SettingsRes(settings))
+            .insert_resource(ThemeRes(Theme::fallback()))
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<ColorMaterial>>()
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .init_state::<super::super::RunState>()
+            .add_systems(Startup, setup)
+            .add_systems(FixedUpdate, sim_targets)
+            .add_systems(
+                PreUpdate,
+                (clear_input_frame, arm_fire_gate, apply_mouse_look).chain(),
+            )
+            .add_systems(
+                Update,
+                (
+                    update_camera,
+                    sync_render_pos,
+                    aimbot_drive,
+                    fire_hitscan,
+                    track_beam,
+                    director_tick,
+                    tick_clock,
+                )
+                    .chain(),
+            );
+        app.world_mut().spawn((
+            Window {
+                focused: true,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app
+    }
+
+    /// 跑 n 帧（可选按住激活键）；返回 (hits, misses, 鼠标采样条数)。
+    fn run_frames(app: &mut App, n: u32, hold_aim_key: bool) -> (i64, i64, usize) {
+        app.update(); // Startup + 首批目标
+        app.update(); // FireGate 武装
+        assert!(app.world().resource::<FireGate>().armed);
+        if hold_aim_key {
+            // 默认激活键是鼠标右键（Settings::default().aimbot_key）。
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Right);
+        }
+        for _ in 0..n {
+            app.update();
+        }
+        let score = app.world().resource::<ScoreState>();
+        let trace = &app.world().resource::<LiveTrace>().file;
+        (score.hits, score.misses, trace.mouse.len())
+    }
+
+    #[test]
+    fn aimbot_should_hit_wall_targets_via_real_input_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf(), wall_spec(), true);
+        // 15 秒模拟：按住激活键，应多次命中，且轨迹证明走了 MouseMotion 管线。
+        let (hits, misses, mouse_n) = run_frames(&mut app, (15_000 / FRAME_MS) as u32, true);
+        assert!(mouse_n > 100, "MouseMotion 轨迹应为非空, got {mouse_n}");
+        assert!(hits >= 10, "静态墙面 15s 应多次命中, hits={hits}");
+        let total = hits + misses;
+        assert!(
+            total > 0 && hits * 10 >= total * 6,
+            "命中率应 >=60%: {hits}/{total}"
+        );
+    }
+
+    #[test]
+    fn aimbot_should_hit_grid_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf(), grid_spec(), true);
+        let (hits, misses, _) = run_frames(&mut app, (15_000 / FRAME_MS) as u32, true);
+        assert!(hits >= 8, "Gridshot 15s 应多次命中, hits={hits}");
+        assert!(
+            hits * 10 >= (hits + misses) * 5,
+            "命中率应 >=50%: {hits}/{}",
+            hits + misses
+        );
+    }
+
+    #[test]
+    fn aimbot_should_hit_slow_moving_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf(), sine_spec(), true);
+        let (hits, _, _) = run_frames(&mut app, (20_000 / FRAME_MS) as u32, true);
+        assert!(hits >= 2, "慢速移动靶 20s 应有命中, hits={hits}");
+    }
+
+    /// 34fps 诊断（用户实测机帧率）：整场跑满，打印命中数 + 抖动指标
+    /// （单帧位移分位数、方向反转率）。`--nocapture` 看数字。
+    /// 注意：headless 时间走 `TimeUpdateStrategy::ManualDuration`，
+    /// `delta_secs` = 29ms 与真实 34fps 一致。
+    #[test]
+    fn aimbot_wall_at_34fps_should_report_jitter_metrics() {
+        const MS: u64 = 29; // ~34fps
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app_cfg_fps(
+            dir.path().to_path_buf(),
+            wall_spec(),
+            true,
+            Settings {
+                countdown_secs: 0,
+                ..Settings::default()
+            },
+            MS,
+        );
+        app.update();
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        for _ in 0..(15_000 / MS) {
+            app.update();
+        }
+        let score = app.world().resource::<ScoreState>();
+        let trace = &app.world().resource::<LiveTrace>().file;
+        let mut mags: Vec<f64> = trace
+            .mouse
+            .iter()
+            .map(|m| (f64::from(m.dx) * f64::from(m.dx) + f64::from(m.dy) * f64::from(m.dy)).sqrt())
+            .collect();
+        // 方向反转率：相邻非零帧 dx 变号比例（>15% = 来回拉扯感）。
+        let mut flips = 0u32;
+        let mut pairs = 0u32;
+        for w in trace.mouse.windows(2) {
+            let (a, b) = (w[0].dx, w[1].dx);
+            if a.abs() > 0.5 && b.abs() > 0.5 {
+                pairs += 1;
+                if a.signum() != b.signum() {
+                    flips += 1;
+                }
+            }
+        }
+        mags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| {
+            if mags.is_empty() {
+                0.0
+            } else {
+                mags[((mags.len() - 1) as f64 * p) as usize]
+            }
+        };
+        println!(
+            "34fps diag: hits={} misses={} mouse_n={} |mag| p50={:.1} p90={:.1} p99={:.1} flips={}/{}",
+            score.hits,
+            score.misses,
+            mags.len(),
+            pct(0.5),
+            pct(0.9),
+            pct(0.99),
+            flips,
+            pairs
+        );
+        assert!(score.hits >= 8, "34fps 15s 应多次命中, hits={}", score.hits);
+    }
+
+    /// 匀速系三算法各跑一遍：AFG/NEXO/Nep 都应能收敛并命中。
+    /// 低速场景里它们没有反应延迟，命中数应不少于 Rain 的量级。
+    #[test]
+    fn aimbot_const_algo_variants_should_hit() {
+        use crate::settings::AimAlgo;
+        for algo in [AimAlgo::Afg, AimAlgo::Nexo, AimAlgo::Nep] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = AppPaths::from_root(dir.path().to_path_buf());
+            paths.ensure_dirs().unwrap();
+            let mut app = build_app_cfg(
+                dir.path().to_path_buf(),
+                wall_spec(),
+                true,
+                Settings {
+                    countdown_secs: 0,
+                    aimbot_algo: algo,
+                    ..Settings::default()
+                },
+            );
+            let (hits, misses, mouse_n) = run_frames(&mut app, (15_000 / FRAME_MS) as u32, true);
+            assert!(
+                hits >= 8,
+                "{algo:?} 静态墙面 15s 应多次命中, hits={hits} misses={misses}"
+            );
+            assert!(mouse_n > 100, "{algo:?} 应有输出轨迹, got {mouse_n}");
+        }
+    }
+
+    /// 人形靶默认瞄头：`headshot_only` 下只有命中头部才计分；
+    /// 同一配置改成瞄 Center，打身体全记空枪 → 命中应显著更少。
+    #[test]
+    fn aimbot_should_default_to_head_on_humanoid() {
+        let run = |part: crate::settings::AimbotPart| {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = AppPaths::from_root(dir.path().to_path_buf());
+            paths.ensure_dirs().unwrap();
+            let mut app = build_app_cfg(
+                dir.path().to_path_buf(),
+                humanoid_spec(),
+                true,
+                Settings {
+                    countdown_secs: 0,
+                    aimbot_part: part,
+                    ..Settings::default()
+                },
+            );
+            run_frames(&mut app, (12_000 / FRAME_MS) as u32, true)
+        };
+        let (head_hits, _, _) = run(crate::settings::AimbotPart::Head);
+        assert!(
+            head_hits >= 2,
+            "默认瞄头在 headshot_only 场景应有命中, hits={head_hits}"
+        );
+        let (ctr_hits, _, _) = run(crate::settings::AimbotPart::Center);
+        assert!(
+            ctr_hits < head_hits,
+            "瞄 Center 命中应显著少于瞄头: {ctr_hits} vs {head_hits}"
+        );
+    }
+
+    /// 端到端整场：跑满 duration 到 `clock.finished`，统计命中率。
+    /// 结果打印供汇报用（`--nocapture` 可见）。
+    #[test]
+    fn aimbot_full_match_should_finish_with_hit_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf(), wall_spec(), true);
+        app.update(); // Startup
+        app.update(); // FireGate 武装
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right); // 按住激活键打完全场
+        let mut frames = 0u32;
+        while !app.world().resource::<super::super::MatchClock>().finished {
+            app.update();
+            frames += 1;
+            assert!(frames < 60_000, "整场比赛应能在限定帧数内结束");
+        }
+        let score = app.world().resource::<ScoreState>();
+        let total = score.hits + score.misses;
+        let rate = if total > 0 {
+            score.hits as f64 / total as f64
+        } else {
+            0.0
+        };
+        println!(
+            "E2E full match: frames={frames} hits={} misses={} total={total} hit_rate={:.1}%",
+            score.hits,
+            score.misses,
+            rate * 100.0
+        );
+        assert!(total > 0, "整场应有射击");
+        assert!(rate >= 0.5, "整场命中率应 >=50%, got {:.1}%", rate * 100.0);
+    }
+
+    /// 持键语义：武装了但没按住激活键 → 不瞄不开火。
+    #[test]
+    fn aimbot_without_aim_key_should_do_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf(), wall_spec(), true);
+        let (hits, misses, mouse_n) = run_frames(&mut app, (2_000 / FRAME_MS) as u32, false);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+        assert!(mouse_n <= 1, "未持键不应产生输入, got {mouse_n}");
+    }
+
+    #[test]
+    fn aimbot_disabled_should_do_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build_app(dir.path().to_path_buf(), wall_spec(), false);
+        // 武装为 false 时即使按住激活键也不应产生输入。
+        let (hits, misses, mouse_n) = run_frames(&mut app, (2_000 / FRAME_MS) as u32, true);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+        // setup.rs 会写 1 条初始朝向采样；自瞄关闭时不应再有新增。
+        assert!(mouse_n <= 1, "关闭时不应产生输入, got {mouse_n}");
     }
 }

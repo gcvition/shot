@@ -12,12 +12,13 @@ use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::Select;
 use gpui_kit::component::slider::Slider;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Root, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::sce::{self, ScenarioSpec};
-use crate::settings::DisplayMode;
+use crate::settings::{AimAlgo, AimbotButton, AimbotPart, DisplayMode};
 
 use super::intent::{Intent, Page};
 use super::model::Shell;
@@ -281,6 +282,140 @@ impl Shell {
                             .label("开始倒计时")
                             .description("0 表示立即开始")
                             .child(NumberInput::new(&self.countdown).small().w(rems(5.))),
+                    ),
+            )
+            .child(section_title(cx, "自瞄"))
+            .child(
+                Form::vertical()
+                    .small()
+                    .child(
+                        Field::new()
+                            .label("启用自瞄")
+                            .description("无 DMA/MAKCU 环境下的算法测试通路")
+                            .child(
+                                Switch::new("aimbot-enable")
+                                    .checked(s.aimbot_enabled)
+                                    .small()
+                                    .on_click(cx.listener(|this, on, window, cx| {
+                                        this.dispatch(
+                                            Intent::SetAimbotEnabled(*on),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Field::new()
+                            .label("激活键")
+                            .description("局内按住生效；左键不可绑（与开火冲突）")
+                            .child(
+                                RadioGroup::horizontal("aimbot-key")
+                                    .selected_index(Some(match s.aimbot_key {
+                                        AimbotButton::Right => 0,
+                                        AimbotButton::Middle => 1,
+                                        AimbotButton::Back => 2,
+                                        AimbotButton::Forward => 3,
+                                    }))
+                                    .on_click(cx.listener(|this, ix, window, cx| {
+                                        let key = match *ix {
+                                            1 => AimbotButton::Middle,
+                                            2 => AimbotButton::Back,
+                                            3 => AimbotButton::Forward,
+                                            _ => AimbotButton::Right,
+                                        };
+                                        this.dispatch(Intent::SetAimbotKey(key), window, cx);
+                                    }))
+                                    .child(Radio::new("ak-right").label("右键").small())
+                                    .child(Radio::new("ak-middle").label("中键").small())
+                                    .child(Radio::new("ak-back").label("后侧键").small())
+                                    .child(Radio::new("ak-forward").label("前侧键").small()),
+                            ),
+                    )
+                    .child(
+                        Field::new()
+                            .label("索敌 FOV（度）")
+                            .description("准星周围该角度内的目标才会被瞄准")
+                            .child(slider_with_input(&self.aimfov, &self.aimfov_input, rems(5.5))),
+                    )
+                    .child(
+                        Field::new()
+                            .label("显示自瞄 FOV")
+                            .description("局内画出索敌范围圈")
+                            .child(
+                                Switch::new("aimbot-fov-vis")
+                                    .checked(s.aimbot_fov_visible)
+                                    .small()
+                                    .on_click(cx.listener(|this, on, window, cx| {
+                                        this.dispatch(
+                                            Intent::SetAimbotFovVisible(*on),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Field::new()
+                            .label("水平速度倍率")
+                            .description("1.00 = 默认拟人速度")
+                            .child(slider_with_input(&self.spdx, &self.spdx_input, rems(5.5))),
+                    )
+                    .child(
+                        Field::new()
+                            .label("垂直速度倍率")
+                            .child(slider_with_input(&self.spdy, &self.spdy_input, rems(5.5))),
+                    )
+                    .child(
+                        Field::new()
+                            .label("瞄准部位")
+                            .description("人形目标取点；非人形目标自动回退中心")
+                            .child(
+                                RadioGroup::horizontal("aimbot-part")
+                                    .selected_index(Some(match s.aimbot_part {
+                                        AimbotPart::Head => 0,
+                                        AimbotPart::Body => 1,
+                                        AimbotPart::Center => 2,
+                                    }))
+                                    .on_click(cx.listener(|this, ix, window, cx| {
+                                        let part = match *ix {
+                                            1 => AimbotPart::Body,
+                                            2 => AimbotPart::Center,
+                                            _ => AimbotPart::Head,
+                                        };
+                                        this.dispatch(Intent::SetAimbotPart(part), window, cx);
+                                    }))
+                                    .child(Radio::new("ap-head").label("头部").small())
+                                    .child(Radio::new("ap-body").label("躯干").small())
+                                    .child(Radio::new("ap-center").label("中心").small()),
+                            ),
+                    )
+                    .child(
+                        Field::new()
+                            .label("自瞄算法")
+                            .description("Rain 为自研拟人状态机；其余三家为匀速步进系对照实现")
+                            .child(
+                                RadioGroup::horizontal("aimbot-algo")
+                                    .selected_index(Some(match s.aimbot_algo {
+                                        AimAlgo::Rain => 0,
+                                        AimAlgo::Afg => 1,
+                                        AimAlgo::Nexo => 2,
+                                        AimAlgo::Nep => 3,
+                                    }))
+                                    .on_click(cx.listener(|this, ix, window, cx| {
+                                        let algo = match *ix {
+                                            1 => AimAlgo::Afg,
+                                            2 => AimAlgo::Nexo,
+                                            3 => AimAlgo::Nep,
+                                            _ => AimAlgo::Rain,
+                                        };
+                                        this.dispatch(Intent::SetAimbotAlgo(algo), window, cx);
+                                    }))
+                                    .child(Radio::new("aa-rain").label("Rain").small())
+                                    .child(Radio::new("aa-afg").label("AFG").small())
+                                    .child(Radio::new("aa-nexo").label("NEXO").small())
+                                    .child(Radio::new("aa-nep").label("Nep").small()),
+                            ),
                     ),
             )
             .child(section_title(cx, "画面"))
