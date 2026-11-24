@@ -32,6 +32,7 @@ impl Shell {
         match intent {
             Intent::OpenPage(page) => self.open_page(page, window, cx),
             Intent::StartScenario(id) => self.start(id, window, cx),
+            Intent::StartPlaylist(id) => self.start_playlist(id, window, cx),
             Intent::ReplaySession(id) => self.replay(&id, window, cx),
             Intent::AskDeleteSession { id, name } => self.confirm_delete(id, name, window, cx),
             Intent::DeleteSession(id) => self.delete_session(&id, window, cx),
@@ -326,6 +327,25 @@ impl Shell {
         let id = uuid::Uuid::new_v4().to_string();
         match crate::launch::run_play(&scenario, &id) {
             Ok(_) => self.after_play(&id, window, cx),
+            Err(e) => {
+                window.push_notification(Notification::error(format!("启动失败: {e}")), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// M7：课程连播——spawn 同一份 exe `playlist <id>`，结束后刷新记录。
+    fn start_playlist(&mut self, playlist: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.persist_settings(window, cx, false) {
+            return;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        match crate::launch::run_playlist(&playlist, &id) {
+            Ok(_) => {
+                self.reload_history();
+                self.page = Page::Results;
+                window.push_notification(Notification::success("课程结束"), cx);
+            }
             Err(e) => {
                 window.push_notification(Notification::error(format!("启动失败: {e}")), cx);
             }

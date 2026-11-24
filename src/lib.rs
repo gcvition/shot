@@ -47,6 +47,7 @@
 //! | [`fov`] | 水平/垂直 FOV 换成 Bevy 要的垂直弧度 |
 //! | [`vec3`] | 序列化用的小向量（不依赖 Bevy） |
 
+pub mod analysis;
 pub mod appearance;
 pub mod assets;
 pub mod display;
@@ -55,6 +56,7 @@ pub mod fov;
 pub mod hitscan;
 pub mod launch;
 pub mod paths;
+pub mod playlist;
 pub mod project;
 pub mod sce;
 pub mod scenario;

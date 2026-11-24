@@ -17,7 +17,7 @@ mod spec;
 
 pub use document::{KvSection, SceDocument, SceWarning};
 pub use spec::{
-    AdsSpec, Block, BotSpec, DifficultyKnobs, EndCondition, FireMode, LegacySpawn, MapSpec,
+    AdsSpec, Block, BotParams, BotSpec, DifficultyKnobs, EndCondition, FireMode, LegacySpawn, MapSpec,
     MotionSpec, MovementPreset, PlayerSpec, RecoilSpec, ScenarioCategory, ScenarioSpec,
     ScenarioTags, ScoringMode, ScoringSpec, SpawnGroup, SpawnPoint, SpawnRegion, SpawnRule,
     SpreadSpec, TargetShape, UnitMode, WeaponKind, WeaponSpec,

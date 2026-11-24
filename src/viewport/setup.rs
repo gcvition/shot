@@ -24,7 +24,7 @@ use crate::vec3::Vec3 as V3;
 use super::{
     AppPathsRes, AudioBank, DegPerCount, FireGate, HUD_LAYER, LiveTrace, Look, MatchClock,
     MeshCache, NextTargetId, PlayerBody, ReplayCtl, RngRes, ScoreState, SettingsRes,
-    TargetMaterials, ThemeRes, ViewPunch, ViewportLaunch, ViewportMode, WORLD_LAYER,
+    TargetMaterials, ThemeRes, ViewportLaunch, ViewportMode, WORLD_LAYER,
 };
 
 /// 把准星和文字画进 RT 的 2D 相机。
@@ -64,11 +64,27 @@ pub(crate) fn setup(
     let deg = crate::sensitivity::deg_per_count(settings.cm_per_360, settings.dpi).unwrap_or(0.06);
     commands.insert_resource(DegPerCount(deg));
     commands.insert_resource(Look {
-        yaw: 0.0,
+        yaw: launch.scenario.player.start_yaw_deg,
         pitch: 0.0,
     });
-    commands.insert_resource(ViewPunch::default());
-    commands.insert_resource(PlayerBody::default());
+    commands.insert_resource(crate::viewport::combat::WeaponState::for_weapon(
+        &launch.scenario.weapon,
+    ));
+    let php_max = if launch.scenario.player.hp > 0.0 {
+        launch.scenario.player.hp
+    } else {
+        100.0
+    };
+    commands.insert_resource(crate::viewport::combat::PlayerHp {
+        hp: php_max,
+        max: php_max,
+        invuln_until: 0.0,
+    });
+    commands.insert_resource(PlayerBody {
+        pos: launch.scenario.player.start_pos,
+        prev_pos: launch.scenario.player.start_pos,
+        ..Default::default()
+    });
     commands.insert_resource(MatchClock {
         countdown: if launch.mode == ViewportMode::Play {
             settings.countdown_secs as f32
@@ -305,6 +321,29 @@ pub(crate) fn setup(
             None => {}
         }
     }
+    // 地图障碍块（M4）：深灰盒子，命中体会挡子弹和 LOS。
+    for b in &launch.scenario.map.blocks {
+        let size = bevy::math::Vec3::new(
+            (b.max.x - b.min.x).max(0.05),
+            (b.max.y - b.min.y).max(0.05),
+            (b.max.z - b.min.z).max(0.05),
+        );
+        let center = bevy::math::Vec3::new(
+            (b.min.x + b.max.x) * 0.5,
+            (b.min.y + b.max.y) * 0.5,
+            (b.min.z + b.max.z) * 0.5,
+        );
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::from_size(size))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.25, 0.27, 0.3),
+                ..Default::default()
+            })),
+            Transform::from_translation(center),
+            RenderLayers::layer(WORLD_LAYER),
+        ));
+    }
+
     // v2 场景：spawn 导演管首批 + 重生。legacy 也插空壳，系统资源不缺。
     let mut next_id = max_id + 1;
     let director = super::director::SpawnDirector::new(
@@ -324,6 +363,8 @@ pub(crate) fn setup(
             &mut next_id,
             &mut trace,
             look_dir,
+            PLAYER_EYE,
+            &launch.scenario.map.blocks,
         );
     }
     commands.insert_resource(mesh_cache);
@@ -353,6 +394,7 @@ pub(crate) fn setup(
                 speed: 1.0,
                 paused: false,
                 target_tracks,
+                third_person: false,
             });
         }
     } else {

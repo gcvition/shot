@@ -29,7 +29,8 @@ use crate::vec3::Vec3 as V3;
 
 use super::targets::{Life, MeshCache, SpawnCtx, TargetBounds};
 use super::{
-    Kinematics, LiveTrace, Look, RenderPos, SimPos, Target, TargetMotion, TargetRng, WORLD_LAYER,
+    Kinematics, LiveTrace, Look, PlayerBody, RenderPos, SimPos, Target, TargetMotion, TargetRng,
+    ViewportLaunch, WORLD_LAYER,
 };
 
 /// 固定模拟频率。240Hz 时即使 360FPS 显示器插值误差也 < 1cm。
@@ -124,7 +125,11 @@ pub(crate) fn region_aabb(region: &SpawnRegion, margin: f32) -> Aabb {
         } => {
             let d = dist_range.1;
             (
-                V3::new(PLAYER_EYE.x - d, 0.0, PLAYER_EYE.z - d),
+                V3::new(
+                    PLAYER_EYE.x - d,
+                    (PLAYER_EYE.y - d).max(0.0),
+                    PLAYER_EYE.z - d,
+                ),
                 V3::new(PLAYER_EYE.x + d, PLAYER_EYE.y + d, PLAYER_EYE.z + d),
             )
         }
@@ -183,26 +188,65 @@ fn spawn_group_target(
             }
     });
     let bounds = region_aabb(&group.region, 3.0);
-    super::targets::spawn_moving(
-        commands,
-        meshes,
-        cache,
-        mat,
-        id,
-        pos,
-        radius,
-        RenderLayers::layer(WORLD_LAYER),
-        motion,
-        motion_rng,
-        bounds,
-        Life {
-            spawned_at: sim_time,
-            expires_at,
-            group: group_idx as u32,
-            first_hit_done: false,
-        },
-        group.no_shoot,
-    );
+    let life = Life {
+        spawned_at: sim_time,
+        expires_at,
+        group: group_idx as u32,
+        first_hit_done: false,
+    };
+    let spawned = if group.archetype == crate::sce::TargetShape::Humanoid {
+        // 人形：胶囊身体 + 头；head 材质暂用 normal。
+        super::targets::spawn_humanoid(
+            commands,
+            meshes,
+            mat.clone(),
+            mat.clone(),
+            id,
+            pos,
+            RenderLayers::layer(WORLD_LAYER),
+            motion,
+            motion_rng,
+            bounds,
+            life,
+            group.no_shoot,
+            group.hp,
+            group.headshot_only,
+        )
+    } else {
+        let archetype = match group.archetype {
+            crate::sce::TargetShape::Box => super::targets::TargetArchetype::Box,
+            crate::sce::TargetShape::Disc => super::targets::TargetArchetype::Disc,
+            _ => super::targets::TargetArchetype::Sphere,
+        };
+        super::targets::spawn_moving(
+            commands,
+            meshes,
+            cache,
+            mat,
+            id,
+            pos,
+            radius,
+            RenderLayers::layer(WORLD_LAYER),
+            motion,
+            motion_rng,
+            bounds,
+            life,
+            group.no_shoot,
+            group.hp,
+            group.headshot_only,
+            archetype,
+        )
+    };
+    // AI 对手：装大脑，首发瞄准时间用场景 RNG 采样。
+    if let Some(bot) = group.bot {
+        let (lo, hi) = bot.aim_time;
+        let first = sim_time
+            + if hi <= lo { lo } else { lo + rng.random::<f32>() * (hi - lo) };
+        commands.entity(spawned).insert(super::targets::BotBrain {
+            params: bot,
+            next_shot: first,
+        });
+    }
     trace.world.push(WorldEvent {
         t_us,
         kind: WorldKind::Spawn,
@@ -309,11 +353,19 @@ fn sample_point(
     rng: &mut ChaCha8Rng,
     live: &[V3],
     look_dir: V3,
+    eye: V3,
+    blocks: &[crate::sce::Block],
 ) -> V3 {
     let mut last = V3::ZERO;
     for _ in 0..SAMPLE_TRIES {
-        let pos = group.region.sample(rng, PLAYER_EYE);
+        let pos = group.region.sample(rng, eye);
         last = pos;
+        // require_los：出生点必须看得见。
+        if group.rule.require_los
+            && !super::combat::los_clear(eye, pos, blocks)
+        {
+            continue;
+        }
         let sep_ok = group.rule.min_separation <= 0.0
             || live
                 .iter()
@@ -325,7 +377,11 @@ fn sample_point(
         if rule.min_angle_from_crosshair_deg > 0.0
             || rule.max_angle_from_crosshair_deg < 180.0
         {
-            let to = pos.sub(PLAYER_EYE).normalized();
+            let rel = pos.sub(eye);
+            if rel.length() < 1e-3 {
+                continue; // 采样点贴在眼位 → 方向无定义，拒绝。
+            }
+            let to = rel.normalized();
             let cos = to.dot(look_dir).clamp(-1.0, 1.0);
             let ang = cos.acos().to_degrees();
             if ang < rule.min_angle_from_crosshair_deg
@@ -346,13 +402,15 @@ pub(crate) fn director_tick(
     mut spawn: SpawnCtx,
     mut trace: ResMut<LiveTrace>,
     look: Res<Look>,
-    time: Res<Time>,
+    body: Res<PlayerBody>,
+    launch: Res<ViewportLaunch>,
+    _time: Res<Time>,
     targets: Query<(&Target, &SimPos, Option<&Life>)>,
 ) {
     if director.groups.is_empty() {
         return;
     }
-    let t_us = (time.elapsed_secs() * 1_000_000.0) as u64;
+    let t_us = (director.sim_time * 1_000_000.0) as u64;
     let look_dir = crate::scenario::look_direction(look.yaw, look.pitch);
     // 收集到期任务（先拿出来，避免借用冲突）。
     let now = director.sim_time;
@@ -365,6 +423,9 @@ pub(crate) fn director_tick(
             true
         }
     });
+    // 本 pass 已生的目标对后续 alive/minSep 判定可见（Commands 延迟，Query 看不到）。
+    let mut live: Vec<V3> = targets.iter().map(|(_, sim, _)| sim.curr).collect();
+    let mut extra_alive: std::collections::HashMap<usize, usize> = Default::default();
     for p in due {
         let Some(group) = director.groups.get(p.group) else {
             continue;
@@ -372,12 +433,21 @@ pub(crate) fn director_tick(
         let alive = targets
             .iter()
             .filter(|(_, _, life)| life.is_some_and(|l| l.group as usize == p.group))
-            .count();
+            .count()
+            + extra_alive.get(&p.group).copied().unwrap_or(0);
         if alive >= group.count.min(group.rule.max_alive) {
             continue;
         }
-        let live: Vec<V3> = targets.iter().map(|(_, sim, _)| sim.curr).collect();
-        let pos = sample_point(group, &mut spawn.rng.0, &live, look_dir);
+        let pos = sample_point(
+            group,
+            &mut spawn.rng.0,
+            &live,
+            look_dir,
+            body.eye(),
+            &launch.scenario.map.blocks,
+        );
+        live.push(pos);
+        *extra_alive.entry(p.group).or_insert(0) += 1;
         spawn_group_target(
             &mut spawn.commands,
             &mut spawn.meshes,
@@ -410,11 +480,13 @@ pub(crate) fn spawn_initial(
     next_id: &mut u32,
     trace: &mut crate::session::SessionFile,
     look_dir: V3,
+    eye: V3,
+    blocks: &[crate::sce::Block],
 ) {
     let mut live: Vec<V3> = Vec::new();
     for gi in 0..director.groups.len() {
         for _ in 0..director.groups[gi].count.min(director.groups[gi].rule.max_alive) {
-            let pos = sample_point(&director.groups[gi], rng, &live, look_dir);
+            let pos = sample_point(&director.groups[gi], rng, &live, look_dir, eye, blocks);
             spawn_group_target(
                 commands, meshes, cache, normal_mat, no_shoot_mat, rng, next_id, director,
                 gi, pos, 0.0, 0, trace,

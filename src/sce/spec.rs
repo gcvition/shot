@@ -43,6 +43,8 @@ pub struct ScenarioSpec {
     /// 旧版生成方式：随机球墙或 NxN 网格。
     /// 有值 = v1 场景，视口按旧逻辑跑；None = v2 DSL 场景。
     pub legacy: Option<LegacySpawn>,
+    /// 基准阈值（M7）：[(tier, score)]，如 bronze/silver/gold。
+    pub benchmark: Vec<(String, f32)>,
 }
 
 impl ScenarioSpec {
@@ -69,6 +71,7 @@ impl ScenarioSpec {
             live_count: 6,
             target_radius: 0.13,
             legacy: Some(LegacySpawn::RandomWall),
+            benchmark: Vec::new(),
         }
     }
 }
@@ -223,9 +226,88 @@ pub struct WeaponSpec {
     pub spread: SpreadSpec,
     pub recoil: RecoilSpec,
     pub ads: Option<AdsSpec>,
+    /// 爆炸半径（米）；0 = 非爆炸（M8）。
+    pub aoe: f32,
 }
 
 impl WeaponSpec {
+    /// 步枪压枪预设。
+    pub fn rifle_auto() -> Self {
+        Self {
+            kind: WeaponKind::Hitscan,
+            fire_mode: FireMode::Auto,
+            fire_interval: 60.0 / 700.0,
+            damage: 20.0,
+            headshot_mult: 2.0,
+            pellets: 1,
+            magazine: Some(30),
+            reload_empty: 2.4,
+            reload_partial: 1.9,
+            falloff: None,
+            spread: SpreadSpec { base: 0.4, per_shot: 0.25, decay: 4.0, max: 1.8 },
+            recoil: RecoilSpec { pitch: 0.55, yaw: 0.25, pattern: None, view_scale: 1.0, reset_dps: 6.0, negatable: true },
+            ads: None,
+            aoe: 0.0,
+        }
+    }
+
+    /// 三连点射预设。
+    pub fn rifle_burst() -> Self {
+        let mut s = Self::rifle_auto();
+        s.fire_mode = FireMode::Burst { count: 3, interval: 60.0 / 900.0 };
+        s.fire_interval = 0.55;
+        s.spread = SpreadSpec { base: 0.15, per_shot: 0.1, decay: 6.0, max: 1.0 };
+        s.recoil = RecoilSpec { pitch: 0.4, yaw: 0.15, pattern: None, view_scale: 1.0, reset_dps: 9.0, negatable: true };
+        s
+    }
+
+    /// 抛射物预设（30 m/s，微重力）。
+    pub fn projectile_arc() -> Self {
+        Self {
+            kind: WeaponKind::Projectile { speed: 30.0, gravity_scale: 0.0, radius: 0.2 },
+            fire_mode: FireMode::Auto,
+            fire_interval: 0.5,
+            damage: 50.0,
+            headshot_mult: 1.0,
+            pellets: 1,
+            magazine: None,
+            reload_empty: 0.0,
+            reload_partial: 0.0,
+            falloff: None,
+            spread: SpreadSpec::default(),
+            recoil: RecoilSpec::default(),
+            ads: None,
+            aoe: 0.0,
+        }
+    }
+
+    /// 带重力抛物线抛射物。
+    pub fn projectile_lob() -> Self {
+        let mut s = Self::projectile_arc();
+        s.kind = WeaponKind::Projectile { speed: 35.0, gravity_scale: 1.0, radius: 0.3 };
+        s
+    }
+
+    /// 追踪光束预设。
+    pub fn beam_dps() -> Self {
+        Self {
+            kind: WeaponKind::Beam,
+            fire_mode: FireMode::Auto,
+            fire_interval: 0.0,
+            damage: 120.0,
+            headshot_mult: 1.0,
+            pellets: 1,
+            magazine: None,
+            reload_empty: 0.0,
+            reload_partial: 0.0,
+            falloff: None,
+            spread: SpreadSpec::default(),
+            recoil: RecoilSpec::default(),
+            ads: None,
+            aoe: 0.0,
+        }
+    }
+
     pub fn hitscan_click() -> Self {
         Self {
             kind: WeaponKind::Hitscan,
@@ -241,6 +323,7 @@ impl WeaponSpec {
             spread: SpreadSpec::default(),
             recoil: RecoilSpec::default(),
             ads: None,
+            aoe: 0.0,
         }
     }
 }
@@ -276,6 +359,10 @@ pub struct SpreadSpec {
 /// 后坐力（M2）。pattern 指向 `res/recoil/<name>.json`。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecoilSpec {
+    /// 每发上抬（度）。
+    pub pitch: f32,
+    /// 每发随机左右偏摆上限（度）。
+    pub yaw: f32,
     pub pattern: Option<String>,
     /// 视角跟随后坐力的比例（弹道=1，CS 约 0.5）。
     pub view_scale: f32,
@@ -301,10 +388,31 @@ pub struct SpawnGroup {
     pub radius: f32,
     /// true = 不该打的目标（Go/No-Go）：命中算惩罚。
     pub no_shoot: bool,
+    /// 血量；0 = 一枪死。
+    pub hp: f32,
+    /// true = 只有爆头有效（M3）。
+    pub headshot_only: bool,
+    /// AI 对手参数（M6）；None = 普通靶。
+    pub bot: Option<BotParams>,
     pub count: usize,
     pub region: SpawnRegion,
     pub motion: MotionSpec,
     pub rule: SpawnRule,
+}
+
+/// AI 对手行为参数（M6）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BotParams {
+    /// 开火前瞄准时间范围（秒）。
+    pub aim_time: (f32, f32),
+    /// 开火间隔（秒）。
+    pub fire_interval: f32,
+    /// 每发命中概率。
+    pub accuracy: f32,
+    /// 每发对玩家伤害。
+    pub damage: f32,
+    /// 是否横移走位。
+    pub strafe: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -24,6 +24,8 @@ pub(crate) struct ReplayCtl {
     pub paused: bool,
     /// `id → 关键帧序列`（targets 按 id 分组；M1 运动目标靠它插值位置）。
     pub target_tracks: std::collections::HashMap<u32, Vec<crate::session::TargetKeyframe>>,
+    /// V 键切换：第三人称跟随镜头（M8）。
+    pub third_person: bool,
 }
 
 /// 在关键帧轨上按 `t_us` 插值位置（轨外钳到端点）。
@@ -42,8 +44,8 @@ fn track_pos(track: &[crate::session::TargetKeyframe], t_us: u64) -> crate::vec3
             }
             let a = &track[idx - 1];
             let b = &track[idx];
-            let span = (b.t_us - a.t_us).max(1) as f32;
-            let alpha = (t_us - a.t_us) as f32 / span;
+            let span = b.t_us.saturating_sub(a.t_us).max(1) as f32;
+            let alpha = t_us.saturating_sub(a.t_us) as f32 / span;
             a.pos.add(b.pos.sub(a.pos).scale(alpha))
         }
     }
@@ -80,6 +82,9 @@ pub(crate) fn replay_tick(
     if keys.just_pressed(KeyCode::ArrowRight) {
         replay.time += 1.0;
     }
+    if keys.just_pressed(KeyCode::KeyV) {
+        replay.third_person = !replay.third_person;
+    }
     if !replay.paused {
         replay.time += time.delta_secs() * replay.speed;
     }
@@ -99,7 +104,7 @@ pub(crate) fn replay_tick(
             WorldKind::Spawn | WorldKind::Visible => {
                 live.insert(event.id, event);
             }
-            WorldKind::Despawn | WorldKind::Hidden => {
+            WorldKind::Despawn | WorldKind::Hidden | WorldKind::Killed => {
                 live.remove(&event.id);
             }
         }

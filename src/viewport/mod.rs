@@ -56,6 +56,7 @@
 
 mod clock;
 mod combat;
+mod course;
 pub(crate) mod director;
 mod gfx;
 mod hud;
@@ -69,7 +70,7 @@ mod window;
 pub(crate) use clock::{LiveTrace, MatchClock};
 pub(crate) use combat::{AudioBank, ScoreState};
 pub(crate) use director::SpawnDirector;
-pub(crate) use player::{DegPerCount, FireGate, Look, PlayerBody, ViewPunch};
+pub(crate) use player::{DegPerCount, FireGate, Look, PlayerBody};
 pub(crate) use replay::ReplayCtl;
 pub(crate) use state::RunState;
 pub(crate) use targets::{
@@ -148,6 +149,25 @@ pub(crate) enum PlaySet {
 
 /// 启动 Bevy App。这个函数会阻塞到窗口关掉（或训练结束发 `AppExit`）。
 pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> anyhow::Result<()> {
+    run_inner(mode, scenario, session_id, None)
+}
+
+/// 课程连播入口（M7）：同 `run`，但插 `PlanRun`——打完一关进
+/// `Intermission` 课间换 spec，而不是退出。
+pub fn run_playlist(
+    scenario: ScenarioSpec,
+    session_id: String,
+    plan: crate::playlist::PlanRun,
+) -> anyhow::Result<()> {
+    run_inner(ViewportMode::Play, scenario, session_id, Some(plan))
+}
+
+fn run_inner(
+    mode: ViewportMode,
+    scenario: ScenarioSpec,
+    session_id: String,
+    plan: Option<crate::playlist::PlanRun>,
+) -> anyhow::Result<()> {
     let paths = AppPaths::discover()?;
     paths.ensure_dirs()?;
     let settings = Settings::load_or_default(&paths)?;
@@ -158,8 +178,8 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
         }
         DisplayMode::Windowed => WindowMode::Windowed,
     };
-    App::new()
-        .add_plugins(
+    let mut app = App::new();
+    app.add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
@@ -220,7 +240,14 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
         // FixedUpdate：目标运动模拟。只在 Playing 跑（倒计时/结束冻结）。
         .add_systems(
             FixedUpdate,
-            director::sim_targets
+            (
+                director::sim_targets,
+                player::move_player,
+                combat::advance_projectiles,
+                combat::bot_fire,
+                combat::weapon_tick,
+            )
+                .chain()
                 .run_if(is_play)
                 .run_if(in_state(RunState::Playing)),
         )
@@ -241,8 +268,10 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
             Update,
             (
                 player::update_camera,
+                player::ads_zoom,
                 director::sync_render_pos,
             )
+                .chain()
                 .in_set(PlaySet::Camera),
         )
         .add_systems(
@@ -253,10 +282,10 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
                 .in_set(PlaySet::Fire),
         )
         .add_systems(
-            Update,
+            FixedUpdate,
             director::director_tick
                 .run_if(is_play)
-                .in_set(PlaySet::Spawn),
+                .run_if(in_state(RunState::Playing)),
         )
         .add_systems(
             Update,
@@ -275,6 +304,14 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
                 .in_set(PlaySet::Replay),
         )
         .add_systems(Update, hud::update_hud.in_set(PlaySet::Hud))
+        // M7：课间——进 Intermission 换 spec 重开，结果卡 6s 或 Enter 跳过。
+        .add_systems(OnEnter(RunState::Intermission), course::round_reset)
+        .add_systems(
+            Update,
+            course::intermission_tick
+                .run_if(is_play)
+                .run_if(in_state(RunState::Intermission)),
+        )
         .add_systems(
             Update,
             (
@@ -284,8 +321,11 @@ pub fn run(mode: ViewportMode, scenario: ScenarioSpec, session_id: String) -> an
             )
                 .chain()
                 .in_set(PlaySet::Present),
-        )
-        .run();
+        );
+    if let Some(plan) = plan {
+        app.insert_resource(plan);
+    }
+    app.run();
     Ok(())
 }
 

@@ -32,9 +32,18 @@ pub enum RunState {
 
 /// 把 `MatchClock` 翻成 `RunState`。放在 `PlaySet::Clock` 的 `tick_clock` 后面，
 /// 读到的是本帧已经推进过的时钟。
-pub(crate) fn sync_run_state(clock: Res<MatchClock>, mut next: ResMut<NextState<RunState>>) {
+pub(crate) fn sync_run_state(
+    clock: Res<MatchClock>,
+    plan: Option<Res<crate::playlist::PlanRun>>,
+    mut next: ResMut<NextState<RunState>>,
+) {
     let state = if clock.finished {
-        RunState::Finished
+        // 课程还有下一关 → 课间；否则真结束。
+        if plan.is_some_and(|p| p.idx < p.playlist.scenarios.len()) {
+            RunState::Intermission
+        } else {
+            RunState::Finished
+        }
     } else if clock.countdown > 0.0 {
         RunState::Countdown
     } else {

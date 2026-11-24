@@ -179,10 +179,12 @@ pub struct RoundEvent {
 
 /// 世界上目标的出现/消失/可见性。回放时按时间重放这张表就能重建现场。
 /// 判别值顺序不能变：postcard 按序号编码，旧 v2 文件要靠它解码。
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WorldKind {
     Spawn,
     Despawn,
+    /// 被打死（区别于寿终/规则消失的 Despawn；分析/回放要区分）。
+    Killed,
     /// 从掩体/墙后变可见（Peek 场景，M4 起写）。
     Visible,
     Hidden,
@@ -256,7 +258,11 @@ impl SessionFile {
     pub fn save(&self, paths: &AppPaths) -> Result<()> {
         paths.ensure_dirs()?;
         let bytes = super::codec::encode_v2(self)?;
-        std::fs::write(paths.session_trace(&self.header.session_id), bytes)?;
+        // 原子写：tmp + rename，崩溃不留半截文件。
+        let path = paths.session_trace(&self.header.session_id);
+        let tmp = path.with_extension("shot.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 
@@ -264,7 +270,18 @@ impl SessionFile {
     pub fn load(paths: &AppPaths, session_id: &str) -> Result<Self> {
         let path = paths.session_trace(session_id);
         let bytes = std::fs::read(&path)?;
-        Ok(super::codec::decode(&bytes)?.into_v2())
+        let mut file = super::codec::decode(&bytes)?.into_v2();
+        if file.header.schema_version > SCHEMA_VERSION {
+            return Err(crate::error::ShotError::Other(format!(
+                "session schema {} 比当前支持的 {SCHEMA_VERSION} 新",
+                file.header.schema_version
+            )));
+        }
+        // 文件名是权威 id；内容里不一致时按文件名归一。
+        if file.header.session_id != session_id {
+            file.header.session_id = session_id.to_string();
+        }
+        Ok(file)
     }
 
     /// 按时间取视角。没有采样时返回 (0, 0)。
@@ -282,10 +299,12 @@ impl SessionFile {
             Err(i) => {
                 let a = &self.mouse[i - 1];
                 let b = &self.mouse[i];
-                let span = (b.t_us - a.t_us).max(1) as f32;
+                let span = b.t_us.saturating_sub(a.t_us).max(1) as f32;
                 let t = (t_us.saturating_sub(a.t_us)) as f32 / span;
+                // yaw 走最短角向插值：179.9 → -179.9 跨 ±180 不许绕 360。
+                let dyaw = (b.yaw_deg - a.yaw_deg + 540.0) % 360.0 - 180.0;
                 (
-                    a.yaw_deg + (b.yaw_deg - a.yaw_deg) * t,
+                    (a.yaw_deg + dyaw * t + 540.0) % 360.0 - 180.0,
                     a.pitch_deg + (b.pitch_deg - a.pitch_deg) * t,
                 )
             }

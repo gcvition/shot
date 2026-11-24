@@ -86,6 +86,7 @@ pub fn convert(doc: &SceDocument, id: &str) -> (ScenarioSpec, Vec<SceWarning>) {
         target_radius,
         glossy,
         legacy: Some(legacy),
+        benchmark: Vec::new(),
         scoring: ScoringSpec::legacy_hits(),
         ..ScenarioSpec::fallback(id)
     };

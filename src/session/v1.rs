@@ -12,7 +12,7 @@ use crate::vec3::Vec3;
 
 /// 开局那一瞬间的设置快照。回放必须用当时的 FOV/分辨率，不能用现在的。
 /// v2 也继续用这一份。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SettingsSnapshot {
     pub cm_per_360: f64,
     pub dpi: u32,

@@ -226,7 +226,10 @@ impl Motion {
                 s.vel = dir.scale(*speed);
                 s.pos = s.pos.add(s.vel.scale(dt));
                 bounce(&mut s.pos, &mut s.vel, &ctx.bounds);
-                *dir = s.vel.normalized();
+                // 速度被边界清零时别把 dir 写成零向量（会永久卡死）。
+                if s.vel.length() > 1e-6 {
+                    *dir = s.vel.normalized();
+                }
             }
             Self::Strafe {
                 speed,
@@ -251,12 +254,25 @@ impl Motion {
                 } else {
                     s.vel = want;
                 }
-                s.pos = s.pos.add(s.vel.scale(dt));
-                if s.pos.x < ctx.bounds.min.x || s.pos.x > ctx.bounds.max.x {
+                // 只沿 strafe 轴积分（Composite 里 y 归 Jumper 管）。
+                let along = axis.scale(s.vel.dot(*axis));
+                s.pos = s.pos.add(along.scale(dt));
+                // 边界检测也按轴投影，不是只看 x。
+                let pa = axis.x.abs() * s.pos.x
+                    + axis.y.abs() * s.pos.y
+                    + axis.z.abs() * s.pos.z;
+                let lo = axis.x.abs() * ctx.bounds.min.x
+                    + axis.y.abs() * ctx.bounds.min.y
+                    + axis.z.abs() * ctx.bounds.min.z;
+                let hi = axis.x.abs() * ctx.bounds.max.x
+                    + axis.y.abs() * ctx.bounds.max.y
+                    + axis.z.abs() * ctx.bounds.max.z;
+                if pa < lo || pa > hi {
                     *dir = -*dir;
                 }
                 s.pos = clamp_to_bounds(s.pos, &ctx.bounds);
-                s.vel.y = 0.0;
+                // vel 只保留沿轴分量（垂直分量归其他 Composite 部件管）。
+                s.vel = along;
             }
             Self::Sine {
                 anchor,
@@ -278,7 +294,7 @@ impl Motion {
                 angle,
                 y_offset,
             } => {
-                *angle += *angular_speed * dt;
+                *angle = (*angle + *angular_speed * dt) % std::f32::consts::TAU;
                 let c = center.unwrap_or(ctx.player_eye);
                 s.pos = V3::new(
                     c.x + *radius * angle.cos(),
@@ -331,7 +347,7 @@ impl Motion {
                     band_sign = -1.0;
                 }
                 let want = V3::new(d.lr_dir * d.speed, 0.0, 0.0).add(
-                    fb_axis.scale(band_sign.max(0.0) * d.speed + d.fb_dir * 0.3 * d.speed),
+                    fb_axis.scale(band_sign * d.speed + d.fb_dir * 0.3 * d.speed),
                 );
                 let dv = want.sub(V3::new(s.vel.x, 0.0, s.vel.z));
                 let dv_len = dv.length();

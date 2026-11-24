@@ -8,7 +8,8 @@
 
 use super::document::{KvSection, SceWarning};
 use super::spec::{
-    DodgeSpec, MotionSpec, SpawnGroup, SpawnPoint, SpawnRegion, SpawnRule, TargetShape,
+    Block, BotParams, DodgeSpec, FireMode, MovementPreset, MotionSpec, PlayerSpec,
+    SpawnGroup, SpawnPoint, SpawnRegion, SpawnRule, SpreadSpec, TargetShape, WeaponKind, WeaponSpec,
 };
 use crate::vec3::Vec3;
 use std::collections::HashMap;
@@ -68,8 +69,13 @@ fn parse_vec3(raw: &str) -> Option<Vec3> {
 /// 把 `k=v k2=v2 ...`（第一个 token 是 kind）拆成 (kind, map)。
 /// 键统一小写——DSL 里 `minSep`/`jumpI` 这类驼峰写法都能匹配。
 fn parse_kv(raw: &str) -> (String, HashMap<String, String>) {
-    let mut tokens = raw.split_whitespace();
-    let kind = tokens.next().unwrap_or("").to_string();
+    let mut tokens = raw.split_whitespace().peekable();
+    // 首 token 带 '=' 就不是 kind（ShotPlayer/ShotBot 没有 kind 位）。
+    let kind = if tokens.peek().is_some_and(|t| t.contains('=')) {
+        String::new()
+    } else {
+        tokens.next().unwrap_or("").to_string()
+    };
     let mut map = HashMap::new();
     for tok in tokens {
         if let Some((k, v)) = tok.split_once('=') {
@@ -100,7 +106,14 @@ fn get_bool(map: &HashMap<String, String>, key: &str) -> bool {
 
 /// 解析 `ShotMotion=`。支持 `KindA k=v + KindB k=v` 复合。
 pub fn parse_motion(raw: &str) -> Result<MotionSpec, String> {
-    if raw.contains('+') {
+    let composite = raw.char_indices().any(|(i, c)| {
+        c == '+'
+            && raw[i + 1..]
+                .chars()
+                .find(|n| !n.is_whitespace())
+                .is_some_and(|n| n.is_ascii_alphabetic())
+    });
+    if composite {
         let parts: Result<Vec<_>, _> = raw
             .split('+')
             .map(|seg| parse_motion_single(seg.trim()))
@@ -144,8 +157,8 @@ fn parse_motion_single(raw: &str) -> Result<MotionSpec, String> {
         }),
         "dodge" => {
             let mut d = DodgeSpec::default();
-            if let Some(v) = get_f32(&m, "speed") {
-                d.speed = v;
+            if let Some(v) = get_range(&m, "speed") {
+                d.speed = (v.0 + v.1) * 0.5;
             }
             if let Some(v) = get_f32(&m, "accel") {
                 d.accel = v;
@@ -180,7 +193,9 @@ fn parse_motion_single(raw: &str) -> Result<MotionSpec, String> {
             Ok(MotionSpec::Dodge(d))
         }
         "jumper" | "jump" => Ok(MotionSpec::Jumper {
-            jump_speed: get_f32(&m, "speed").unwrap_or(6.0),
+            jump_speed: get_range(&m, "speed")
+                .map(|(a, b)| (a + b) * 0.5)
+                .unwrap_or(6.0),
             gravity: get_f32(&m, "gravity").unwrap_or(20.0),
             interval: get_range(&m, "interval").unwrap_or((1.0, 3.0)),
         }),
@@ -237,6 +252,10 @@ pub fn parse_region(raw: &str) -> Result<SpawnRegion, String> {
             // p=(x,y,z,w);p=(…)；w = 权重
             let mut points = Vec::new();
             for seg in raw.split(';').skip(1) {
+                let seg = seg.rsplit('=').next().unwrap_or(seg).trim();
+                if seg.is_empty() {
+                    continue;
+                }
                 let v = parse_vec3(seg).ok_or_else(|| err("p"))?;
                 points.push(SpawnPoint {
                     pos: Vec3::new(v.x, v.y, v.z),
@@ -355,6 +374,17 @@ pub fn collect_groups(section: &KvSection, warnings: &mut Vec<SceWarning>) -> Ve
                 .get(&format!("ShotNoShoot{suffix}"))
                 .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            hp: section
+                .get(&format!("ShotSpawnHP{suffix}"))
+                .and_then(parse_f32)
+                .unwrap_or(0.0),
+            headshot_only: section
+                .get(&format!("ShotHeadshotOnly{suffix}"))
+                .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+                .unwrap_or(false),
+            bot: section
+                .get(&format!("ShotBot{suffix}"))
+                .and_then(|raw| parse_bot(raw).ok()),
             count: section
                 .get(&format!("ShotSpawnCount{suffix}"))
                 .and_then(parse_f32)
@@ -372,6 +402,9 @@ pub fn collect_groups(section: &KvSection, warnings: &mut Vec<SceWarning>) -> Ve
 pub fn is_spawn_key(key: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "ShotSpawnRegion",
+        "ShotSpawnHP",
+        "ShotHeadshotOnly",
+        "ShotBot",
         "ShotSpawnRule",
         "ShotMotion",
         "ShotSpawnCount",
@@ -438,4 +471,179 @@ mod tests {
         assert!(parse_motion("Warp speed=3").is_err());
         assert!(parse_region("Triangle x=1").is_err());
     }
+}
+
+fn get_u32(map: &HashMap<String, String>, key: &str) -> Option<u32> {
+    map.get(key)?.trim().parse::<u32>().ok()
+}
+
+/// 
+pub fn parse_bot(raw: &str) -> Result<BotParams, String> {
+    let (_head, map) = parse_kv(raw);
+    Ok(BotParams {
+        aim_time: get_range(&map, "aim").unwrap_or((0.35, 0.8)),
+        fire_interval: get_f32(&map, "interval").unwrap_or(1.1),
+        accuracy: get_f32(&map, "acc").unwrap_or(0.45),
+        damage: get_f32(&map, "dmg").unwrap_or(8.0),
+        strafe: get_bool(&map, "strafe"),
+    })
+}
+
+/// 。预设：hitscan/rifle/burst/projectile/lob/beam。
+pub fn parse_weapon(raw: &str) -> Result<WeaponSpec, String> {
+    let (head, map) = parse_kv(raw);
+    let mut w = match head.as_str() {
+        "" | "hitscan" => WeaponSpec::hitscan_click(),
+        "rifle" | "rifle_auto" | "auto" => WeaponSpec::rifle_auto(),
+        "burst" | "rifle_burst" => WeaponSpec::rifle_burst(),
+        "projectile" | "arc" => WeaponSpec::projectile_arc(),
+        "lob" => WeaponSpec::projectile_lob(),
+        "beam" => WeaponSpec::beam_dps(),
+        other => return Err(format!("unknown weapon preset '{other}'")),
+    };
+    if let Some(mode) = map.get("mode") {
+        w.fire_mode = match mode.trim().to_ascii_lowercase().as_str() {
+            "semi" => FireMode::Semi,
+            "auto" => FireMode::Auto,
+            "burst" => FireMode::Burst {
+                count: get_u32(&map, "burstn").unwrap_or(3),
+                interval: get_f32(&map, "burstint").unwrap_or(0.07),
+            },
+            other => return Err(format!("unknown fire mode '{other}'")),
+        };
+    }
+    if let Some(v) = get_f32(&map, "rpm") {
+        if v > 0.0 {
+            w.fire_interval = 60.0 / v;
+        }
+    }
+    if let Some(v) = get_f32(&map, "dmg") {
+        w.damage = v;
+    }
+    if let Some(v) = get_f32(&map, "hsmult") {
+        w.headshot_mult = v;
+    }
+    if let Some(v) = get_u32(&map, "pellets") {
+        w.pellets = v.max(1);
+    }
+    if let Some(v) = get_u32(&map, "mag") {
+        w.magazine = if v == 0 { None } else { Some(v) };
+    }
+    if let Some(v) = get_f32(&map, "reload") {
+        w.reload_empty = v;
+        w.reload_partial = v * 0.8;
+    }
+    if let Some(v) = map.get("spread") {
+        // spread=base[,per_shot,decay,max]
+        let nums: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        w.spread = match nums.len() {
+            1 => SpreadSpec { base: nums[0], per_shot: 0.0, decay: 0.0, max: 0.0 },
+            4 => SpreadSpec { base: nums[0], per_shot: nums[1], decay: nums[2], max: nums[3] },
+            _ => return Err(format!("spread needs 1 or 4 numbers, got '{v}'")),
+        };
+    }
+    if let Some(v) = map.get("recoil") {
+        // recoil=pitch[,yaw]
+        let nums: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        match nums.len() {
+            1 => {
+                w.recoil.pitch = nums[0];
+            }
+            2 => {
+                w.recoil.pitch = nums[0];
+                w.recoil.yaw = nums[1];
+            }
+            _ => return Err(format!("recoil needs 1 or 2 numbers, got '{v}'")),
+        }
+    }
+    if let Some(v) = get_f32(&map, "reset") {
+        w.recoil.reset_dps = v;
+    }
+    if map.contains_key("negatable") {
+        w.recoil.negatable = get_bool(&map, "negatable");
+    }
+    if let Some(v) = map.get("ads") {
+        // ads=zoomfov[,sens_mult]（M8 开镜）
+        let nums: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        w.ads = Some(crate::sce::AdsSpec {
+            zoom_fov: nums.first().copied().unwrap_or(50.0).clamp(10.0, 120.0),
+            sens_mult: nums.get(1).copied().unwrap_or(0.7).clamp(0.1, 2.0),
+            time_in: 0.12,
+            blocks_shooting: false,
+        });
+    }
+    if let Some(v) = get_f32(&map, "aoe") {
+        w.aoe = v.max(0.0);
+    }
+    if let Some(v) = get_f32(&map, "viewscale") {
+        w.recoil.view_scale = v;
+    }
+    if let Some(v) = get_f32(&map, "speed") {
+        if let WeaponKind::Projectile { speed, .. } = &mut w.kind {
+            *speed = v;
+        }
+    }
+    if let Some(v) = get_f32(&map, "grav") {
+        if let WeaponKind::Projectile { gravity_scale, .. } = &mut w.kind {
+            *gravity_scale = v;
+        }
+    }
+    if let Some(v) = get_f32(&map, "radius") {
+        if let WeaponKind::Projectile { radius, .. } = &mut w.kind {
+            *radius = v;
+        }
+    }
+    Ok(w)
+}
+
+/// 
+pub fn parse_player(raw: &str) -> Result<PlayerSpec, String> {
+    let (_head, map) = parse_kv(raw);
+    let mut p = PlayerSpec::default();
+    if let Some(v) = get_vec3(&map, "pos") {
+        p.start_pos = v;
+    }
+    if let Some(v) = get_f32(&map, "yaw") {
+        p.start_yaw_deg = v;
+    }
+    if let Some(v) = get_f32(&map, "hp") {
+        p.hp = v;
+    }
+    if let Some(v) = map.get("preset") {
+        p.movement_preset = match v.trim().to_ascii_lowercase().as_str() {
+            "static" => MovementPreset::Static,
+            "tactical" => MovementPreset::Tactical,
+            "arena" => MovementPreset::Arena,
+            "br" | "battleroyale" => MovementPreset::BattleRoyale,
+            other => return Err(format!("unknown movement preset '{other}'")),
+        };
+    }
+    Ok(p)
+}
+
+/// （六个数，中心角点序）。
+pub fn parse_block(raw: &str) -> Result<Block, String> {
+    let nums: Vec<f32> = raw.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+    if nums.len() != 6 {
+        return Err(format!("block needs 6 numbers, got '{raw}'"));
+    }
+    Ok(Block {
+        min: Vec3::new(nums[0], nums[1], nums[2]),
+        max: Vec3::new(nums[3], nums[4], nums[5]),
+    })
+}
+
+/// （阈值百分比或绝对分）。
+pub fn parse_benchmark(raw: &str) -> Result<Vec<(String, f32)>, String> {
+    let mut out = Vec::new();
+    for part in raw.split_whitespace() {
+        if let Some((k, v)) = part.split_once('=') {
+            let f: f32 = v.trim().parse().map_err(|_| format!("bad benchmark '{part}'"))?;
+            out.push((k.trim().to_string(), f));
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("empty benchmark '{raw}'"));
+    }
+    Ok(out)
 }

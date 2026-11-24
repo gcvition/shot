@@ -8,7 +8,8 @@
 use super::document::{KvSection, SceWarning};
 use super::dsl;
 use super::spec::{
-    MovementPreset, ScenarioCategory, ScenarioTags, ScoringMode, ScoringSpec, UnitMode,
+    EndCondition, MovementPreset, ScenarioCategory, ScenarioTags, ScoringMode, ScoringSpec,
+    UnitMode,
 };
 
 /// M0 认得的扩展键。
@@ -20,6 +21,11 @@ const KNOWN_KEYS: &[&str] = &[
     "ShotSkillWeights",
     "ShotMovementPreset",
     "ShotWeaponPreset",
+    "ShotWeapon",
+    "ShotPlayer",
+    "ShotMapBounds",
+    "ShotBenchmark",
+    "ShotEndCondition",
 ];
 
 /// 把 `[Shot Extension]` 段叠到 spec 的可调部分上。
@@ -94,7 +100,64 @@ pub fn apply(
             ))),
         }
     }
-    // ShotWeaponPreset 已认领但 M2 武器库才生效，这里不动作也不告警。
+    // ShotWeapon / ShotWeaponPreset → 武器规格（M2）。
+    for key in ["ShotWeapon", "ShotWeaponPreset"] {
+        if let Some(raw) = section.get(key) {
+            match dsl::parse_weapon(raw) {
+                Ok(w) => spec.weapon = w,
+                Err(e) => warnings.push(SceWarning::new(format!("{key}: {e}"))),
+            }
+        }
+    }
+    // ShotPlayer → 出生点 / 移动预设 / 血量（M4）。
+    if let Some(raw) = section.get("ShotPlayer") {
+        match dsl::parse_player(raw) {
+            Ok(p) => spec.player = p,
+            Err(e) => warnings.push(SceWarning::new(format!("ShotPlayer: {e}"))),
+        }
+    }
+    // ShotMapBounds + ShotBlock[N] → 地图（M4）。
+    if let Some(raw) = section.get("ShotMapBounds") {
+        match dsl::parse_block(raw) {
+            Ok(b) => spec.map.bounds = Some((b.min, b.max)),
+            Err(e) => warnings.push(SceWarning::new(format!("ShotMapBounds: {e}"))),
+        }
+    }
+    for key in section.kv.keys() {
+        if let Some(raw) = section.get(key)
+            && key.to_ascii_lowercase().starts_with("shotblock")
+        {
+            match dsl::parse_block(raw) {
+                Ok(b) => spec.map.blocks.push(b),
+                Err(e) => warnings.push(SceWarning::new(format!("{key}: {e}"))),
+            }
+        }
+    }
+    // ShotBenchmark=bronze=50 silver=70 gold=90（M7）。
+    if let Some(raw) = section.get("ShotBenchmark") {
+        match dsl::parse_benchmark(raw) {
+            Ok(b) => spec.benchmark = b,
+            Err(e) => warnings.push(SceWarning::new(format!("ShotBenchmark: {e}"))),
+        }
+    }
+    // ShotEndCondition=kills:20 / damage:5000 / rounds:5 / duration:60
+    if let Some(raw) = section.get("ShotEndCondition") {
+        let (k, v) = raw.split_once(':').unwrap_or((raw.trim(), ""));
+        let n: f32 = v.parse().unwrap_or(0.0);
+        spec.end = match k.trim().to_ascii_lowercase().as_str() {
+            "duration" | "time" if n > 0.0 => EndCondition::Duration,
+            "kills" if n > 0.0 => EndCondition::Kills(n as u32),
+            "damage" if n > 0.0 => EndCondition::Damage(n),
+            "rounds" if n > 0.0 => EndCondition::Rounds(n as u32),
+            _ => {
+                warnings.push(SceWarning::new(format!("ShotEndCondition= 无效")));
+                spec.end
+            }
+        };
+        if n > 0.0 && matches!(spec.end, EndCondition::Duration) {
+            spec.duration_secs = n;
+        }
+    }
     let groups = dsl::collect_groups(section, &mut warnings);
     if !groups.is_empty() {
         // v2 场景：spawn 导演接管，旧版生成路径下线。

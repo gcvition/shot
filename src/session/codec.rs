@@ -42,7 +42,18 @@ pub fn encode_v2(file: &SessionFile) -> Result<Vec<u8>> {
 /// 字节 → [`SessionAny`]。见模块文档的分派顺序。
 pub fn decode(bytes: &[u8]) -> Result<SessionAny> {
     if bytes.starts_with(MAGIC_V2) {
-        let packed = zstd::stream::decode_all(&bytes[MAGIC_V2.len()..])?;
+        // 解压上限 64MB：防 zip bomb。
+        let mut raw = &bytes[MAGIC_V2.len()..];
+        let packed = {
+            let mut out = Vec::new();
+            zstd::stream::copy_decode(&mut raw, &mut out)?;
+            if out.len() > 64 * 1024 * 1024 {
+                return Err(crate::error::ShotError::Other(
+                    "session trace too large after decode".into(),
+                ));
+            }
+            out
+        };
         return Ok(SessionAny::V2(postcard::from_bytes(&packed)?));
     }
     if looks_like_json(bytes) {

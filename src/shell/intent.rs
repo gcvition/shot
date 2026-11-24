@@ -70,6 +70,8 @@ pub(crate) enum Intent {
     OpenPage(Page),
     /// 启动一局训练（会再 spawn 一个 Bevy 进程，当前窗口会卡住直到那局结束）。
     StartScenario(String),
+    /// 启动一条课程连播（M7）。参数是 `playlist::Playlist.id`。
+    StartPlaylist(String),
     /// 回放已有对局。
     ReplaySession(String),
     /// 弹出删除确认框（还没真正删除）。

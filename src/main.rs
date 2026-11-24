@@ -43,10 +43,9 @@ fn real_main() -> anyhow::Result<()> {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("replay requires session id"))?;
             let paths = shot::paths::AppPaths::discover()?;
-            let scenario_id = shot::session::SessionFile::load(&paths, &id)
-                .ok()
-                .map(|file| file.header.scenario)
-                .unwrap_or_else(|| "Sixshot Ultimate".into());
+            let file = shot::session::SessionFile::load(&paths, &id)
+                .map_err(|e| anyhow::anyhow!("读取回放 {id} 失败: {e}"))?;
+            let scenario_id = file.header.scenario.clone();
             let spec = shot::sce::load_scenario(&paths, &scenario_id)
                 .unwrap_or_else(|_| shot::sce::ScenarioSpec::fallback(&scenario_id));
             shot::viewport::run(shot::viewport::ViewportMode::Replay, spec, id)?;
@@ -60,6 +59,41 @@ fn real_main() -> anyhow::Result<()> {
             let paths = shot::paths::AppPaths::discover()?;
             let file = shot::session::SessionFile::load(&paths, &id)?;
             println!("{}", serde_json::to_string_pretty(&file)?);
+        }
+        Some("playlist") => {
+            // 课程连播：`shot playlist <id> [session-id]`。
+            let name = args
+                .get(2)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("playlist requires a course id"))?;
+            let playlist = shot::playlist::find(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown playlist: {name}"))?;
+            let paths = shot::paths::AppPaths::discover()?;
+            let first = playlist.scenarios[0];
+            let spec = shot::sce::load_scenario(&paths, first)
+                .map_err(|e| anyhow::anyhow!("playlist scenario {first}: {e}"))?;
+            let id = args
+                .get(3)
+                .cloned()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let plan = shot::playlist::PlanRun::new(playlist);
+            shot::viewport::run_playlist(spec, id, plan)?;
+        }
+        Some("reanalyze") => {
+            // 重算全部历史局的指标（schema 升级后补数据用）。
+            let paths = shot::paths::AppPaths::discover()?;
+            let db = shot::stats::StatsDb::open(&paths)?;
+            let mut n = 0usize;
+            for rec in db.recent_newest(None, 10_000)? {
+                if let Ok(file) = shot::session::SessionFile::load(&paths, &rec.id) {
+                    let m = shot::analysis::analyze(&file);
+                    let mut rows = m.rows();
+                    rows.push(("score", rec.score_f));
+                    db.insert_metrics(&rec.id, &rows)?;
+                    n += 1;
+                }
+            }
+            println!("reanalyzed {n} sessions");
         }
         _ => shot::shell::run()?,
     }

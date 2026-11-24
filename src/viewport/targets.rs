@@ -69,11 +69,27 @@ impl SimPos {
     }
 }
 
-/// 一个命中区域。目前只有球；M3 加 `Capsule { radius, height, offset }`。
+/// 一个命中区域。球心在 `RenderPos`；`OffsetSphere`/`Capsule` 相对它平移。
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Hitbox {
-    /// 球心在 [`SimPos::curr`]。
+    /// 球心在 `RenderPos`。
     Sphere { radius: f32 },
+    /// 球心在 `RenderPos + offset`（人形头部）。
+    OffsetSphere { radius: f32, offset: V3 },
+    /// 竖直胶囊，`center = RenderPos + (0, offset_y, 0)`（人形躯干）。
+    Capsule { radius: f32, half_height: f32, offset_y: f32 },
+}
+
+/// 只有爆头计分（ShotHeadshotOnly=1）。打中身体按空枪处理。
+#[derive(Component)]
+pub(crate) struct HeadOnly;
+
+/// AI 对手的大脑（M6）：到点朝玩家开枪。
+#[derive(Component)]
+pub(crate) struct BotBrain {
+    pub params: crate::sce::BotParams,
+    /// 下一次开火的模拟秒（含瞄准预热）。
+    pub next_shot: f32,
 }
 
 /// 运动模型实例（v2 目标才有）。fixed tick 由 `sim::director` 推进。
@@ -211,17 +227,20 @@ pub(crate) fn spawn_moving(
     bounds: crate::sim::motion::Aabb,
     life: Life,
     no_shoot: bool,
-) {
+    hp: f32,
+    headshot_only: bool,
+    archetype: TargetArchetype,
+) -> Entity {
     let mesh = cache.sphere(meshes, radius);
-    commands.spawn((
+    let mut e = commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(mat),
         Transform::from_xyz(pos.x, pos.y, pos.z),
         Target {
             id,
-            archetype: TargetArchetype::Sphere,
-            hp: 1.0,
-            max_hp: 1.0,
+            archetype,
+            hp: if hp > 0.0 { hp } else { 1.0 },
+            max_hp: if hp > 0.0 { hp } else { 1.0 },
             team: if no_shoot { Team::Neutral } else { Team::Enemy },
         },
         SimPos::at(pos),
@@ -238,6 +257,85 @@ pub(crate) fn spawn_moving(
         life,
         layer,
     ));
+    if headshot_only {
+        e.insert(HeadOnly);
+    }
+    e.id()
+}
+
+/// 人形目标（M3）：身体竖直胶囊 + 头部小球。
+/// 锚点 `pos` = 胶囊中心（与球形目标一致，运动模型直接驱动）。
+/// 命中体：躯干胶囊（offset_y=0）+ 头 `OffsetSphere`(+HEAD_Y)。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_humanoid(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mat: Handle<StandardMaterial>,
+    head_mat: Handle<StandardMaterial>,
+    id: u32,
+    pos: V3,
+    layer: RenderLayers,
+    motion: crate::sim::motion::Motion,
+    rng: ChaCha8Rng,
+    bounds: crate::sim::motion::Aabb,
+    life: Life,
+    no_shoot: bool,
+    hp: f32,
+    headshot_only: bool,
+) -> Entity {
+    const BODY_R: f32 = 0.28;
+    const BODY_HALF: f32 = 0.58;
+    const HEAD_R: f32 = 0.16;
+    const HEAD_Y: f32 = 1.02;
+    let body = meshes.add(Capsule3d::new(BODY_R, BODY_HALF * 2.0));
+    let head = meshes.add(Sphere::new(HEAD_R).mesh().uv(24, 12));
+    let hp = if hp > 0.0 { hp } else { 1.0 };
+    let mut e = commands.spawn((
+        Mesh3d(body),
+        MeshMaterial3d(mat),
+        Transform::from_xyz(pos.x, pos.y, pos.z),
+        Target {
+            id,
+            archetype: TargetArchetype::Humanoid,
+            hp,
+            max_hp: hp,
+            team: if no_shoot { Team::Neutral } else { Team::Enemy },
+        },
+        SimPos::at(pos),
+        RenderPos(pos),
+        Hitboxes(SmallVec::from_vec(vec![
+            Hitbox::Capsule {
+                radius: BODY_R,
+                half_height: BODY_HALF,
+                offset_y: 0.0,
+            },
+            Hitbox::OffsetSphere {
+                radius: HEAD_R,
+                offset: V3::new(0.0, HEAD_Y, 0.0),
+            },
+        ])),
+        TargetMotion(motion),
+        TargetRng(rng),
+        Kinematics(crate::sim::motion::KinState {
+            pos,
+            vel: V3::ZERO,
+            on_ground: true,
+        }),
+        TargetBounds(bounds),
+        life,
+        layer.clone(),
+    ));
+    if headshot_only {
+        e.insert(HeadOnly);
+    }
+    // 头部视觉球（子实体跟随父 Transform）。
+    e.with_child((
+        Mesh3d(head),
+        MeshMaterial3d(head_mat),
+        Transform::from_xyz(0.0, HEAD_Y, 0.0),
+        layer,
+    ));
+    e.id()
 }
 
 /// `cells` 格子的列数（9 → 3，16 → 4）。

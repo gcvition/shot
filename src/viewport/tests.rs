@@ -42,8 +42,8 @@ mod golden {
         setup::setup,
     };
 
-    const GOLDEN_DIGEST: u64 = 8013938259272503606;
-    const GRID_DIGEST: u64 = 0x1e65e0d9b077210d;
+    const GOLDEN_DIGEST: u64 = 0xc20452198efc60e8;
+    const GRID_DIGEST: u64 = 0xb47681a78160bb88;
     const FRAME_MS: u64 = 8;
     const DURATION_SECS: f32 = 4.0;
     const IDLE_CAP: u32 = 2_000;
@@ -78,7 +78,7 @@ mod golden {
         }
     }
 
-    fn build_app(root: std::path::PathBuf, scenario: ScenarioSpec) -> App {
+    pub(super) fn build_app(root: std::path::PathBuf, scenario: ScenarioSpec) -> App {
         let settings = Settings {
             countdown_secs: 0,
             ..Settings::default()
@@ -197,6 +197,7 @@ mod golden {
                 crate::session::WorldKind::Despawn => 1,
                 crate::session::WorldKind::Visible => 2,
                 crate::session::WorldKind::Hidden => 3,
+                crate::session::WorldKind::Killed => 4,
             });
             push(u64::from(e.id));
             push(e.pos.x.to_bits() as u64);
@@ -305,11 +306,14 @@ mod tracking {
         setup::setup,
     };
 
-    fn tracking_spec() -> ScenarioSpec {
+    pub(super) fn tracking_spec() -> ScenarioSpec {
         let mut spec = ScenarioSpec::fallback("TrackTest");
         spec.legacy = None;
         spec.scoring.mode = ScoringMode::OnTargetPercent;
         spec.spawns = vec![SpawnGroup {
+            hp: 0.0,
+            headshot_only: false,
+            bot: None,
             archetype: TargetShape::Sphere,
             radius: 0.35,
             no_shoot: false,
@@ -454,5 +458,408 @@ mod tracking {
             first.distance(last) > 0.05,
             "目标应该移动过 first={first:?} last={last:?}"
         );
+    }
+}
+
+/// M2 武器系统：连发 / 点射 / 弹匣换弹 / 后坐冲量。
+mod weapons {
+    use std::time::Duration;
+
+    use bevy::input::mouse::MouseMotion;
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy::window::PrimaryWindow;
+
+    use crate::paths::AppPaths;
+    use crate::sce::{ScoringMode, WeaponSpec};
+    use crate::settings::Settings;
+    use crate::theme::Theme;
+
+    use super::super::{
+        AppPathsRes, ScoreState, SettingsRes, ThemeRes, ViewportLaunch, ViewportMode,
+        clock::tick_clock,
+        combat::{WeaponState, advance_projectiles, fire_hitscan, track_beam, weapon_tick},
+        director::{director_tick, sim_targets, sync_render_pos},
+        player::{apply_mouse_look, arm_fire_gate, update_camera},
+        setup::setup,
+    };
+    use super::tracking::tracking_spec;
+
+    fn build(root: std::path::PathBuf, weapon: WeaponSpec) -> App {
+        let mut spec = tracking_spec();
+        spec.weapon = weapon;
+        spec.scoring.mode = ScoringMode::LegacyHits;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(8)))
+            .insert_resource(Time::<Fixed>::from_hz(super::super::director::SIM_HZ))
+            .add_message::<MouseMotion>()
+            .insert_resource(ViewportLaunch {
+                mode: ViewportMode::Play,
+                scenario: spec,
+                session_id: "weapons".into(),
+                seed_override: Some(7),
+            })
+            .insert_resource(AppPathsRes(AppPaths::from_root(root)))
+            .insert_resource(SettingsRes(Settings {
+                countdown_secs: 0,
+                ..Settings::default()
+            }))
+            .insert_resource(ThemeRes(Theme::fallback()))
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<ColorMaterial>>()
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .init_state::<super::super::RunState>()
+            .add_systems(Startup, setup)
+            .add_systems(FixedUpdate, (sim_targets, advance_projectiles, weapon_tick))
+            .add_systems(PreUpdate, (arm_fire_gate, apply_mouse_look).chain())
+            .add_systems(
+                Update,
+                (
+                    update_camera,
+                    sync_render_pos,
+                    fire_hitscan,
+                    track_beam,
+                    director_tick,
+                    tick_clock,
+                )
+                    .chain(),
+            );
+        app.world_mut().spawn((
+            Window {
+                focused: true,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app
+    }
+
+    fn hold(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+    }
+
+    #[test]
+    fn auto_rifle_should_fire_at_interval_and_drain_mag() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build(dir.path().to_path_buf(), WeaponSpec::rifle_auto());
+        app.update();
+        app.update();
+        hold(&mut app);
+        for _ in 0..120 {
+            app.update();
+        }
+        let score = app.world().resource::<ScoreState>();
+        // ~0.96s 模拟时间 / 0.0857s 间隔 ≈ 11 发。
+        assert!(
+            (9..=14).contains(&score.shots_fired),
+            "连发间隔不对：{}",
+            score.shots_fired
+        );
+        let w = app.world().resource::<WeaponState>();
+        assert_eq!(w.mag_left, 30 - score.shots_fired as i32);
+        assert!(w.acc_pitch > 0.0, "后坐应累积");
+        assert!(w.punch_pitch > 0.0, "冲量应跟随");
+    }
+
+    #[test]
+    fn burst_should_fire_exactly_three_per_click() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build(dir.path().to_path_buf(), WeaponSpec::rifle_burst());
+        app.update();
+        app.update();
+        // 一次按下 → 3 发。
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        {
+            // MinimalPlugins 没有 InputPlugin 自动清 just_*，手动模拟。
+            let mut input = app.world_mut().resource_mut::<ButtonInput<MouseButton>>();
+            input.release(MouseButton::Left);
+            input.clear();
+        }
+        for _ in 0..40 {
+            app.update();
+        }
+        let score = app.world().resource::<ScoreState>();
+        assert_eq!(score.shots_fired, 3, "点射应正好 3 发");
+    }
+
+    #[test]
+    fn reload_should_block_fire_then_refill() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut w = WeaponSpec::rifle_auto();
+        w.magazine = Some(3);
+        w.reload_empty = 0.3;
+        let mut app = build(dir.path().to_path_buf(), w);
+        app.update();
+        app.update();
+        hold(&mut app);
+        for _ in 0..40 {
+            app.update();
+        }
+        let score = app.world().resource::<ScoreState>();
+        assert_eq!(score.shots_fired, 3, "弹匣只有 3 发");
+        {
+            let ws = app.world().resource::<WeaponState>();
+            assert!(ws.reload_end > 0.0, "空弹匣应触发换弹");
+        }
+        // 换弹 0.3s ≈ 38 帧，跑 80 帧保证完成 + 又能开火。
+        for _ in 0..80 {
+            app.update();
+        }
+        let score2 = app.world().resource::<ScoreState>();
+        assert!(score2.shots_fired > 3, "换弹完成后应能继续开火");
+    }
+}
+
+/// M4 玩家移动：WASD 前进 / 碰撞阻挡。
+mod movement {
+    use std::time::Duration;
+
+    use bevy::input::mouse::MouseMotion;
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy::window::PrimaryWindow;
+
+    use crate::paths::AppPaths;
+    use crate::sce::{Block, MovementPreset, PlayerSpec, ScoringMode};
+    use crate::settings::Settings;
+    use crate::theme::Theme;
+    use crate::vec3::Vec3 as V3;
+
+    use super::super::{
+        AppPathsRes, PlayerBody, SettingsRes, ThemeRes, ViewportLaunch, ViewportMode,
+        clock::tick_clock,
+        combat::{advance_projectiles, bot_fire, fire_hitscan, track_beam, weapon_tick},
+        director::{director_tick, sim_targets, sync_render_pos},
+        player::{apply_mouse_look, arm_fire_gate, move_player, update_camera},
+        setup::setup,
+    };
+    use super::tracking::tracking_spec;
+
+    pub(super) fn build(root: std::path::PathBuf, blocks: Vec<Block>) -> App {
+        let mut spec = tracking_spec();
+        spec.player = PlayerSpec {
+            movement_preset: MovementPreset::Tactical,
+            ..Default::default()
+        };
+        spec.map.blocks = blocks;
+        spec.scoring.mode = ScoringMode::LegacyHits;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(8)))
+            .insert_resource(Time::<Fixed>::from_hz(super::super::director::SIM_HZ))
+            .add_message::<MouseMotion>()
+            .insert_resource(ViewportLaunch {
+                mode: ViewportMode::Play,
+                scenario: spec,
+                session_id: "movement".into(),
+                seed_override: Some(7),
+            })
+            .insert_resource(AppPathsRes(AppPaths::from_root(root)))
+            .insert_resource(SettingsRes(Settings {
+                countdown_secs: 0,
+                ..Settings::default()
+            }))
+            .insert_resource(ThemeRes(Theme::fallback()))
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<ColorMaterial>>()
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .init_state::<super::super::RunState>()
+            .add_systems(Startup, setup)
+            .add_systems(
+                FixedUpdate,
+                (move_player, sim_targets, advance_projectiles, bot_fire, weapon_tick),
+            )
+            .add_systems(PreUpdate, (arm_fire_gate, apply_mouse_look).chain())
+            .add_systems(
+                Update,
+                (
+                    update_camera,
+                    sync_render_pos,
+                    fire_hitscan,
+                    track_beam,
+                    director_tick,
+                    tick_clock,
+                )
+                    .chain(),
+            );
+        app.world_mut().spawn((
+            Window {
+                focused: true,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app
+    }
+
+    #[test]
+    fn wasd_should_move_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build(dir.path().to_path_buf(), Vec::new());
+        app.update();
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        for _ in 0..120 {
+            app.update();
+        }
+        {
+            let body = app.world().resource::<PlayerBody>();
+            assert!(body.pos.z < -1.0, "W 应前进 -z，实际 {}", body.pos.z);
+            let hs = (body.vel.x * body.vel.x + body.vel.z * body.vel.z).sqrt();
+            assert!(hs > 3.0, "应接近全速 {hs}");
+        }
+        {
+            let mut k = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            k.release(KeyCode::KeyW);
+            k.clear();
+        }
+        for _ in 0..120 {
+            app.update();
+        }
+        let body = app.world().resource::<PlayerBody>();
+        let hs = (body.vel.x * body.vel.x + body.vel.z * body.vel.z).sqrt();
+        assert!(hs < 0.05, "松开 0.5s 应停 {hs}");
+    }
+
+    #[test]
+    fn block_should_stop_the_player() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        // 玩家前方 z=-3..-2 一面墙。
+        let mut app = build(
+            dir.path().to_path_buf(),
+            vec![Block {
+                min: V3::new(-5.0, 0.0, -3.0),
+                max: V3::new(5.0, 3.0, -2.0),
+            }],
+        );
+        app.update();
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        for _ in 0..240 {
+            app.update();
+        }
+        let body = app.world().resource::<PlayerBody>();
+        assert!(
+            body.pos.z > -3.0 + 0.3,
+            "应被墙挡住（含半径），实际 {}",
+            body.pos.z
+        );
+    }
+}
+
+/// M6 AI：bot 到点开火掉玩家血。
+mod bots {
+    use crate::paths::AppPaths;
+    use crate::sce::BotParams;
+
+    use super::super::{LiveTrace, ViewportLaunch};
+    use super::movement::build;
+
+    #[test]
+    fn bot_should_drain_player_hp() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        let mut app = build(dir.path().to_path_buf(), Vec::new());
+        // 给场景加一个会还手的 bot 组（首个 update 前改 spec 才生效）。
+        {
+            let mut launch = app.world_mut().resource_mut::<ViewportLaunch>();
+            launch.scenario.spawns[0].bot = Some(BotParams {
+                aim_time: (0.01, 0.01),
+                fire_interval: 0.05,
+                accuracy: 1.0,
+                damage: 5.0,
+                strafe: false,
+            });
+        }
+        app.update();
+        app.update();
+        for _ in 0..120 {
+            app.update();
+        }
+        let php = app.world().resource::<super::super::combat::PlayerHp>();
+        assert!(php.hp < php.max, "bot 应打掉血，实际 {}", php.hp);
+        let trace = &app.world().resource::<LiveTrace>().file;
+        assert!(!trace.damage_taken.is_empty(), "应有受击事件");
+    }
+}
+
+/// M8 端到端：全部内置场景都能 headless 建 App 跑 60 帧不 panic。
+mod e2e {
+    use crate::paths::AppPaths;
+    use crate::sce;
+
+    use super::golden::build_app;
+
+    #[test]
+    fn every_bundled_scenario_should_boot_headless() {
+        // 用仓库根的 res/scenarios（session 落在 repo cache/，同 dev 运行）。
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let paths = AppPaths::from_root(root.clone());
+        paths.ensure_dirs().unwrap();
+        let specs = sce::list_scenarios(&paths);
+        assert!(!specs.is_empty());
+        // 每个场景起 app 跑 60 帧；脚本不动也不开枪，纯验证 spawn 管线。
+        for spec in specs {
+            let mut app = build_app(root.clone(), spec.clone());
+            for _ in 0..60 {
+                app.update();
+            }
+        }
+    }
+
+    /// 端到端 playlist：PlanRun.advance 能按课表把下一关 spec 装好。
+    #[test]
+    fn playlist_advance_should_load_next_spec() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let paths = AppPaths::from_root(root);
+        paths.ensure_dirs().unwrap();
+        let specs = sce::list_scenarios(&paths);
+        let db = crate::stats::StatsDb::open(&paths).unwrap();
+        let playlist = crate::playlist::BUILTIN
+            .iter()
+            .find(|p| p.id == "voltaic-duel")
+            .unwrap();
+        let mut plan = crate::playlist::PlanRun::new(playlist);
+        // 课表里每个场景 id 都得在盘上（防止改名断链）。
+        for sid in playlist.scenarios {
+            assert!(
+                specs.iter().any(|s| s.id == *sid),
+                "playlist 场景不存在: {sid}"
+            );
+        }
+        assert!(plan.advance("sess-0", 100.0, Some(&db), &specs));
+        assert!(plan.next_spec.is_some());
+        assert!(plan.advance("sess-1", 90.0, Some(&db), &specs));
+        assert!(!plan.advance("sess-2", 80.0, Some(&db), &specs));
+        assert_eq!(plan.results.len(), 3);
     }
 }

@@ -151,6 +151,94 @@ impl StatsDb {
         Ok(())
     }
 
+    /// 把一局算好的指标写进 （M5）。
+    pub fn insert_metrics(&self, session_id: &str, rows: &[(&str, f64)]) -> Result<()> {
+        let mut st = self
+            .conn
+            .prepare("INSERT OR REPLACE INTO session_metrics (session_id, key, value) VALUES (?1, ?2, ?3)")?;
+        for (k, v) in rows {
+            // NaN/Inf 会变成 SQL NULL，撞 NOT NULL 约束还中断后续行——直接跳过。
+            if v.is_finite() {
+                st.execute(rusqlite::params![session_id, k, v])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 读一局的全部指标（分析页用）。
+    pub fn metrics(&self, session_id: &str) -> Result<Vec<(String, f64)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT key, value FROM session_metrics WHERE session_id = ?1")?;
+        let rows = st
+            .query_map([session_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// 某分类最近 N 局某指标的平均值（M7 自适应难度用）。
+    /// 按局去重（同一 session 同 key 只算一次），新到旧取 limit 局。
+    pub fn recent_metric(&self, category: &str, key: &str, limit: usize) -> Option<f64> {
+        let mut st = self
+            .conn
+            .prepare(
+                "SELECT AVG(m.value) FROM session_metrics m
+                 JOIN sessions s ON s.id = m.session_id
+                 WHERE s.category = ?1 AND m.key = ?2
+                   AND m.session_id IN (
+                     SELECT id FROM sessions WHERE category = ?1
+                     ORDER BY started_at DESC LIMIT ?3
+                   )",
+            )
+            .ok()?;
+        st.query_row(rusqlite::params![category, key, limit as i64], |r| r.get(0))
+            .ok()
+    }
+
+    /// M7：写一条技能画像快照。
+    pub fn insert_skill_snapshot(
+        &self,
+        at_unix_ms: i64,
+        skill: &str,
+        value: f64,
+        confidence: f64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO skill_snapshots (at, skill, value, confidence) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![at_unix_ms, skill, value, confidence],
+        )?;
+        Ok(())
+    }
+
+    /// M7：结课时把课程 JSON + 逐项进度写进 plans / plan_items。
+    pub fn save_plan(
+        &mut self,
+        plan_id: &str,
+        created_at: i64,
+        json: &str,
+        items: &[(usize, String, String)],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO plans (id, created_at, json) VALUES (?1, ?2, ?3)",
+            rusqlite::params![plan_id, created_at, json],
+        )?;
+        // 重存同 id：清掉旧条目再写（否则条目数变少时残留旧行）。
+        tx.execute("DELETE FROM plan_items WHERE plan_id = ?1", [plan_id])?;
+        {
+            let mut st = tx.prepare(
+                "INSERT INTO plan_items (plan_id, idx, scenario, session_id, done)
+                 VALUES (?1, ?2, ?3, ?4, 1)",
+            )?;
+            for (idx, scenario, session_id) in items {
+                st.execute(rusqlite::params![plan_id, *idx as i64, scenario, session_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} FROM sessions WHERE id = ?1",

@@ -4,18 +4,32 @@ use bevy::prelude::*;
 
 use crate::sce::{FireMode, ScoringMode, WeaponKind};
 
-use super::{MatchClock, ReplayCtl, ScoreState, ViewportLaunch, setup::HudText};
+use super::combat::{PlayerHp, WeaponState};
+use super::{
+    MatchClock, PlayerBody, ReplayCtl, RunState, ScoreState, ViewportLaunch, setup::HudText,
+};
 
 pub(crate) fn update_hud(
     clock: Res<MatchClock>,
     score: Res<ScoreState>,
+    wstate: Option<Res<WeaponState>>,
+    php: Option<Res<PlayerHp>>,
+    body: Option<Res<PlayerBody>>,
     replay: Option<Res<ReplayCtl>>,
     launch: Res<ViewportLaunch>,
+    state: Option<Res<State<RunState>>>,
+    plan: Option<Res<crate::playlist::PlanRun>>,
     mut text: Query<&mut Text2d, With<HudText>>,
 ) {
     let Ok(mut text) = text.single_mut() else {
         return;
     };
+    if let (Some(state), Some(plan)) = (state.as_ref(), plan.as_ref()) {
+        if **state == RunState::Intermission {
+            *text = Text2d::new(super::course::intermission_label(plan));
+            return;
+        }
+    }
     if let Some(replay) = replay {
         let remain = (replay.file.header.duration_ms as f32 / 1000.0 - replay.time).max(0.0);
         *text = Text2d::new(format!(
@@ -50,11 +64,35 @@ pub(crate) fn update_hud(
         } else {
             format!("{}", score.hits)
         };
+        // 弹匣武器显示余弹/换弹状态。
+        let ammo = match (spec.weapon.magazine, wstate) {
+            (Some(_), Some(w)) if w.reload_end > 0.0 => "   RLD".to_string(),
+            (Some(mag), Some(w)) => format!("   {}/{}", w.mag_left.max(0), mag),
+            _ => String::new(),
+        };
+        // AI 对枪场景显示血量。
+        let hp_txt = match php {
+            Some(p) if launch.scenario.spawns.iter().any(|g| g.bot.is_some()) => {
+                format!("   HP {:.0}", p.hp.max(0.0))
+            }
+            _ => String::new(),
+        };
+        // 移动场景显示水平速度。
+        let speed = match body {
+            Some(b) if launch.scenario.player.movement_preset != crate::sce::MovementPreset::Static => {
+                let hs = (b.vel.x * b.vel.x + b.vel.z * b.vel.z).sqrt();
+                format!("   {:.1}m/s", hs)
+            }
+            _ => String::new(),
+        };
         *text = Text2d::new(format!(
-            "{}:{:02}   {}",
+            "{}:{:02}   {}{}{}{}",
             remain as u32 / 60,
             remain as u32 % 60,
-            stat
+            stat,
+            ammo,
+            speed,
+            hp_txt
         ));
     }
 }

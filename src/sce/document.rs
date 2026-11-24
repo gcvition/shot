@@ -97,11 +97,12 @@ impl SceDocument {
         let mut kv: Option<HashMap<String, String>> = None;
         // 逐行扫；段头名（`[` `]` 之间）留到见到下一段时统一归桶。
         let mut sections: Vec<(String, HashMap<String, String>)> = Vec::new();
-        let mut lines = raw.lines();
+        let mut lines = raw.split_inclusive('\n');
         let mut byte_offset = 0usize;
-        while let Some(line) = lines.next() {
+        while let Some(chunk) = lines.next() {
+            let line = chunk.trim_end_matches(['\n', '\r']);
             let line_start = byte_offset;
-            byte_offset += line.len() + 1;
+            byte_offset += chunk.len();
             let trimmed = line.trim();
             if trimmed.starts_with('{') {
                 // JSON 地图数据从这里到文件尾。

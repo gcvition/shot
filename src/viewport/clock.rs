@@ -54,6 +54,7 @@ pub(crate) fn tick_clock(
     launch: Res<ViewportLaunch>,
     paths: Res<AppPathsRes>,
     settings: Res<SettingsRes>,
+    mut plan: Option<ResMut<crate::playlist::PlanRun>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if clock.finished {
@@ -73,7 +74,28 @@ pub(crate) fn tick_clock(
             &launch.scenario.scoring,
             clock.elapsed as f64,
         );
-        finish_play(&mut trace, &score, &launch, &paths.0, &settings.0);
+        let playlist_id = plan.as_ref().map(|p| p.playlist.id);
+        finish_play(
+            &mut trace,
+            &score,
+            &launch,
+            &paths.0,
+            &settings.0,
+            playlist_id,
+            clock.elapsed,
+        );
+        // M7：还有下一关就不退——装 next_spec，sync_run_state 翻 Intermission。
+        // DB 打不开也照常连播（难度倍率退化为 1.0）。
+        if let Some(plan) = plan.as_mut() {
+            let specs = crate::sce::list_scenarios(&paths.0);
+            let mut db = StatsDb::open(&paths.0).ok();
+            if plan.advance(&launch.session_id, score.score, db.as_ref(), &specs) {
+                return;
+            }
+            if let Some(db) = db.as_mut() {
+                save_plan_record(plan, db);
+            }
+        }
         exit.write(AppExit::Success);
     }
 }
@@ -86,8 +108,11 @@ fn finish_play(
     launch: &ViewportLaunch,
     paths: &AppPaths,
     settings: &Settings,
+    playlist_id: Option<&str>,
+    elapsed: f32,
 ) {
-    let duration_ms = (launch.scenario.duration_secs * 1000.0) as u32;
+    // 提前结束（EndCondition）时按真实时长记，不是标称时长。
+    let duration_ms = (elapsed * 1000.0) as u32;
     trace.file.header.duration_ms = duration_ms;
     let _ = trace.file.save(paths);
     if let Ok(db) = StatsDb::open(paths) {
@@ -116,7 +141,7 @@ fn finish_play(
             kills: score.kills,
             headshots: score.headshots,
             difficulty: None,
-            playlist_id: None,
+            playlist_id: playlist_id.map(str::to_string),
             category: launch
                 .scenario
                 .category
@@ -124,6 +149,43 @@ fn finish_play(
             schema_version: i64::from(crate::session::SCHEMA_VERSION),
         };
         let _ = db.insert(&rec);
+        // M5：结算时同步算指标入库（分析页/课程用）。
+        let metrics = crate::analysis::analyze(&trace.file);
+        let mut rows = metrics.rows();
+        rows.push(("score", score.score));
+        let _ = db.insert_metrics(&launch.session_id, &rows);
+        // M7：关键指标顺手写技能画像（每局一行，课程自适应读它）。
+        let now = rec.started_at;
+        let shots = (score.hits + score.misses).max(1) as f64;
+        for (skill, value) in [
+            (
+                "accuracy_pct",
+                score.hits as f64 / shots * 100.0,
+            ),
+            ("score", score.score),
+        ] {
+            let _ = db.insert_skill_snapshot(now, skill, value, 0.5);
+        }
     }
     let _ = crate::launch::write_last_session(paths, &launch.session_id);
+}
+
+/// 结课：plans / plan_items 落库（M7）。
+fn save_plan_record(plan: &crate::playlist::PlanRun, db: &mut StatsDb) {
+    let items: Vec<(usize, String, String)> = plan
+        .results
+        .iter()
+        .enumerate()
+        .map(|(i, (sce, sid, _))| (i, sce.clone(), sid.clone()))
+        .collect();
+    let json = serde_json::json!({
+        "playlist": plan.playlist.id,
+        "scores": plan.results.iter().map(|(_, _, s)| s).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let _ = db.save_plan(&uuid::Uuid::new_v4().to_string(), now, &json, &items);
 }

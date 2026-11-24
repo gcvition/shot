@@ -23,6 +23,21 @@ pub fn run_play(scenario: &str, session_id: &str) -> Result<ExitStatus> {
     let status = Command::new(exe)
         .args(["play", scenario, session_id])
         .status()?;
+    if !status.success() {
+        return Err(crate::error::ShotError::Other(format!("训练进程异常退出: {status}")));
+    }
+    Ok(status)
+}
+
+/// 阻塞直到课程窗口退出（M7）。
+pub fn run_playlist(playlist: &str, session_id: &str) -> Result<ExitStatus> {
+    let exe = current_exe()?;
+    let status = Command::new(exe)
+        .args(["playlist", playlist, session_id])
+        .status()?;
+    if !status.success() {
+        return Err(crate::error::ShotError::Other(format!("课程进程异常退出: {status}")));
+    }
     Ok(status)
 }
 
@@ -30,6 +45,9 @@ pub fn run_play(scenario: &str, session_id: &str) -> Result<ExitStatus> {
 pub fn run_replay(session_id: &str) -> Result<ExitStatus> {
     let exe = current_exe()?;
     let status = Command::new(exe).args(["replay", session_id]).status()?;
+    if !status.success() {
+        return Err(crate::error::ShotError::Other(format!("回放进程异常退出: {status}")));
+    }
     Ok(status)
 }
 

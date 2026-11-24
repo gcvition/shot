@@ -70,3 +70,14 @@ cargo.exe build --release     # 实际游玩用这个（thin LTO）
 - 跟枪场景（`ShotScoring=OnTargetPercent`）点击只触发受击反应、不杀目标。
 - `.sce` 里 `{` 开头的行 = 地图 JSON 起点，段解析到那里为止。
 - Esc 退出不写成绩；只有 `finish_play`（打满时长）写 `.shot` + SQLite。
+
+## M2-M8 结构速查
+
+- src/viewport/combat.rs：WeaponState（射速/弹匣/后座/散布）、fire_hitscan（命中+伤害管线）、track_beam、advance_projectiles（含 aoe）、bot_fire（AI 开火）、PlayerHp。
+- src/viewport/course.rs：课程 Intermission 的 round_reset / intermission_tick。
+- src/playlist.rs：内置课程 BUILTIN + PlanRun + 自适应 suggest_knobs / apply_knobs。
+- src/analysis.rs：局后指标写入 session_metrics；shot reanalyze 补算历史。
+- src/sim/movement.rs：WASD/跳/蹲/滑铲 + AABB 碰撞（ShotBlock / ShotMapBounds）。
+- DSL 速查：ShotWeapon（mode/rpm/dmg/hsmult/mag/reload/spread/recoil/ads/aoe）、ShotPlayer（preset/hp）、ShotSpawnShape（humanoid）、ShotSpawnHP、ShotHeadshotOnly、ShotBot、ShotMapBounds、ShotBlock[N]、ShotEnd。
+- 滑铲：Shift（移动中）；ADS：右键；回放第三人称：V。
+- 启动课程：shot playlist <id>（菜单「课程」组）。

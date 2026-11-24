@@ -75,7 +75,12 @@ impl AppPaths {
     }
 
     pub fn session_trace(&self, id: &str) -> PathBuf {
-        self.sessions.join(format!("{id}.shot"))
+        // id 只放行 [A-Za-z0-9._-]：命令行传入的 id 不能跳出 sessions/。
+        let safe: String = id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .collect();
+        self.sessions.join(format!("{safe}.shot"))
     }
 }
 

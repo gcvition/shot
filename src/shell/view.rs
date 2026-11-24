@@ -128,6 +128,27 @@ impl Shell {
                 }
             }
         }
+        // M7：课程连播（benchmark playlist），打完一关自动接下一关。
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("课程"),
+        );
+        for pl in crate::playlist::BUILTIN {
+            let pid = pl.id;
+            let label = format!("{} · {} 关", pl.name, pl.scenarios.len());
+            col = col.child(
+                Button::new(format!("pl-{pid}"))
+                    .outline()
+                    .small()
+                    .w_full()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.dispatch(Intent::StartPlaylist(pid.to_string()), window, cx);
+                    })),
+            );
+        }
         col = col.child(section_title(cx, "最近记录")).child(
             Field::new().label("场景").child(
                 Select::new(&self.history_select)

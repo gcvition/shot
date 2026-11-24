@@ -26,22 +26,97 @@ pub fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<
     }
 }
 
+/// 射线与竖直胶囊（人形躯干）。 = 胶囊中点， = 圆柱段半高
+/// （不含两端半球帽，总高 = 2*(half_height + radius)）。原点在胶囊内返回 None。
+pub fn ray_capsule(
+    origin: Vec3,
+    dir: Vec3,
+    center: Vec3,
+    radius: f32,
+    half_height: f32,
+) -> Option<f32> {
+    let dir = dir.normalized();
+    // 分解到「柱轴 Y」与「径向平面 XZ」。
+    let oc = origin.sub(center);
+    let dy = dir.y;
+    let dxz = Vec3::new(dir.x, 0.0, dir.z);
+    let oxz = Vec3::new(oc.x, 0.0, oc.z);
+    let a = dxz.dot(dxz);
+    let mut best: Option<f32> = None;
+    if a > 1e-10 {
+        // 圆柱侧面：|oxz + t*dxz| = r
+        let b = oxz.dot(dxz);
+        let c = oxz.dot(oxz) - radius * radius;
+        let disc = b * b - a * c;
+        if disc >= 0.0 {
+            let s = disc.sqrt();
+            for t in [(-b - s) / a, (-b + s) / a] {
+                if t <= 1e-4 {
+                    continue;
+                }
+                let y = oc.y + t * dy;
+                if y.abs() <= half_height && best.is_none_or(|bt| t < bt) {
+                    best = Some(t);
+                }
+            }
+        }
+    }
+    // 两端半球帽。
+    for sign in [-1.0f32, 1.0] {
+        let cap = Vec3::new(center.x, center.y + sign * half_height, center.z);
+        if let Some(t) = ray_sphere_raw(origin, dir, cap, radius)
+            && best.is_none_or(|bt| t < bt)
+        {
+            best = Some(t);
+        }
+    }
+    best
+}
+
+/// 不单位化 dir 的球测试（ray_capsule 内部已单位化）。
+fn ray_sphere_raw(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let oc = origin.sub(center);
+    let b = oc.dot(dir);
+    let c = oc.dot(oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let t0 = -b - s;
+    let t1 = -b + s;
+    if t0 > 1e-4 {
+        Some(t0)
+    } else if t1 > 1e-4 {
+        Some(t1)
+    } else {
+        None
+    }
+}
+
+/// 点到射线距离（抛射物宽体判定用）。
+pub fn ray_point_dist(origin: Vec3, dir: Vec3, point: Vec3) -> f32 {
+    let rel = point.sub(origin);
+    let t = rel.dot(dir).max(0.0);
+    rel.sub(dir.scale(t)).length()
+}
+
 /// 轴对齐盒子。目前训练不用，留给以后的立方体目标。
 pub fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     let dir = dir.normalized();
     let inv = Vec3::new(
         if dir.x.abs() < 1e-8 {
-            f32::INFINITY
+            f32::MAX
         } else {
             1.0 / dir.x
         },
         if dir.y.abs() < 1e-8 {
-            f32::INFINITY
+            f32::MAX
         } else {
             1.0 / dir.y
         },
         if dir.z.abs() < 1e-8 {
-            f32::INFINITY
+            f32::MAX
         } else {
             1.0 / dir.z
         },
